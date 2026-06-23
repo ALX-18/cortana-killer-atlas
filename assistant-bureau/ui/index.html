@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atlas — Assistant Bureau</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <div class="header-left">
+                <div class="logo">⚡</div>
+                <h1>Atlas</h1>
+                <span class="subtitle">Assistant Bureau</span>
+            </div>
+            <div class="header-right">
+                <div id="bridge-indicator" class="status-dot offline" title="Extension navigateur : non connectée" style="cursor:help;"></div>
+                <div id="status-indicator" class="status-dot offline" title="Hors ligne"></div>
+                <button id="btn-context" class="btn-icon" title="Voir le contexte système">📊</button>
+                <button id="btn-diagnostics" class="btn-icon" title="Diagnostics">🔍</button>
+            </div>
+        </header>
+
+        <!-- Context panel (hidden by default) -->
+        <div id="context-panel" class="panel hidden">
+            <div class="panel-header">
+                <h3>Contexte système</h3>
+                <button class="btn-close" onclick="togglePanel('context-panel')">✕</button>
+            </div>
+            <div id="context-content" class="panel-body">
+                <p class="muted">Chargement...</p>
+            </div>
+        </div>
+
+        <!-- Chat area -->
+        <main id="chat-container">
+            <div id="messages">
+                <div class="message assistant">
+                    <div class="message-avatar">⚡</div>
+                    <div class="message-content">
+                        <p>Salut ! Je suis <strong>Atlas</strong>, ton assistant bureau Windows.</p>
+                        <p>Je peux t'aider à :</p>
+                        <ul>
+                            <li>🚀 Lancer et gérer des applications</li>
+                            <li>📊 Diagnostiquer ton PC (CPU, RAM, GPU, disque)</li>
+                            <li>⚙️ Configurer tes paramètres système</li>
+                            <li>🔧 Optimiser les performances</li>
+                            <li>⌨️ Taper du texte et envoyer des raccourcis dans tes apps</li>
+                            <li>🌐 Interagir dans ton navigateur (avec l'extension Atlas)</li>
+                        </ul>
+                        <p>Dis-moi ce que tu veux faire !</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Input area -->
+        <footer id="input-area">
+            <div class="input-wrapper">
+                <textarea
+                    id="user-input"
+                    placeholder="Écris ta demande ici... (Entrée pour envoyer, Shift+Entrée pour sauter une ligne)"
+                    rows="1"
+                    autofocus
+                ></textarea>
+                <button id="btn-send" title="Envoyer">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </div>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

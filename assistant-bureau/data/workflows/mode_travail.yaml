@@ -1,0 +1,29 @@
+id: mode_travail
+name: "Mode Travail"
+description: "Prépare l'environnement de travail — lance le navigateur, les apps pro, désactive les notifications gaming"
+version: "1.0"
+created_by: "user_manual"
+
+steps:
+  - name: "Lancer le navigateur"
+    action: launch_app
+    params:
+      name: "opera gx"
+    wait_for_completion: true
+  - name: "Lancer VS Code"
+    action: launch_app
+    params:
+      name: "vscode"
+    wait_for_completion: true
+  - name: "Lancer Discord"
+    action: launch_app
+    params:
+      name: "discord"
+  - name: "Notification"
+    action: notify
+    params:
+      message: "Mode Travail activé ✅"
+
+conditions:
+  - type: "confirm_before_run"
+    message: "Activer le mode travail ?"

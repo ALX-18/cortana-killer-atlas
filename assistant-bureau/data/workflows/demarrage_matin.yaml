@@ -1,0 +1,31 @@
+id: demarrage_matin
+name: "Démarrage Matin"
+description: "Lance les applications favorites du matin selon les habitudes mémorisées"
+version: "1.0"
+created_by: "user_manual"
+
+steps:
+  - name: "Lancer le navigateur"
+    action: launch_app
+    params:
+      name: "opera gx"
+    wait_for_completion: true
+  - name: "Lancer Discord"
+    action: launch_app
+    params:
+      name: "discord"
+  - name: "Lancer VS Code"
+    action: launch_app
+    params:
+      name: "vscode"
+  - name: "Diagnostic rapide"
+    action: get_diagnostics
+    params: {}
+  - name: "Notification"
+    action: notify
+    params:
+      message: "Bon matin ! Ton environnement est prêt ☀️"
+
+conditions:
+  - type: "confirm_before_run"
+    message: "Lancer la routine du matin ?"

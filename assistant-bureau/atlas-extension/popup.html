@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Atlas Bridge</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 280px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .header img {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+    }
+
+    .header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .status-card {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .status-row:last-child {
+      margin-bottom: 0;
+    }
+
+    .label {
+      font-size: 12px;
+      color: #9e9e9e;
+    }
+
+    .value {
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+
+    .dot.green { background: #4CAF50; box-shadow: 0 0 6px #4CAF50; }
+    .dot.red { background: #F44336; box-shadow: 0 0 6px #F44336; }
+
+    .btn {
+      width: 100%;
+      padding: 8px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-primary {
+      background: #0f3460;
+      color: #e0e0e0;
+    }
+
+    .btn-primary:hover {
+      background: #1a4b8c;
+    }
+
+    .footer {
+      margin-top: 12px;
+      text-align: center;
+      font-size: 10px;
+      color: #616161;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icons/icon128.png" alt="Atlas">
+    <h1>Atlas Bridge</h1>
+  </div>
+
+  <div class="status-card">
+    <div class="status-row">
+      <span class="label">Statut</span>
+      <span class="value" id="status-text">
+        <span class="dot red" id="status-dot"></span>
+        <span id="status-label">Déconnecté</span>
+      </span>
+    </div>
+    <div class="status-row">
+      <span class="label">Serveur</span>
+      <span class="value" id="ws-url">ws://127.0.0.1:9999</span>
+    </div>
+  </div>
+
+  <button class="btn btn-primary" id="btn-reconnect">Reconnecter</button>
+
+  <div class="footer">
+    Atlas Browser Bridge v1.0.0
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+id: nettoyage_systeme
+name: "Nettoyage Système"
+description: "Nettoie le système — vide la corbeille, supprime les fichiers temporaires, libère la RAM"
+version: "1.0"
+created_by: "user_manual"
+
+steps:
+  - name: "Vider la corbeille"
+    action: maintenance_empty_bin
+    params: {}
+  - name: "Supprimer les fichiers temporaires"
+    action: maintenance_cleanup_temp
+    params:
+      max_age_days: 7
+  - name: "Libérer la RAM cache"
+    action: maintenance_gc
+    params: {}
+  - name: "Notification"
+    action: notify
+    params:
+      message: "Nettoyage système terminé ✅"
+
+conditions:
+  - type: "confirm_before_run"
+    message: "Lancer le nettoyage système ?"

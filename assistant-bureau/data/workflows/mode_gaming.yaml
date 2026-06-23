@@ -1,0 +1,30 @@
+id: mode_gaming
+name: "Mode Gaming"
+description: "Optimise le PC pour le gaming — ferme les apps inutiles, active haute performance, lance Steam"
+version: "1.0"
+created_by: "user_manual"
+
+steps:
+  - name: "Fermer apps inutiles"
+    action: kill_process
+    params:
+      name: "teams.exe"
+    skip_if_intouchable: true
+  - name: "Haute performance"
+    action: system_config
+    params:
+      action: "set_power_plan"
+      plan: "high_performance"
+  - name: "Lancer Steam"
+    action: launch_app
+    params:
+      name: "steam"
+    wait_for_completion: true
+  - name: "Notification"
+    action: notify
+    params:
+      message: "Mode Gaming activé ✅"
+
+conditions:
+  - type: "confirm_before_run"
+    message: "Activer le mode gaming ?"

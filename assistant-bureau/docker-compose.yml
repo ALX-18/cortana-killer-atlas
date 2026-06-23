@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: assistant_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  chromadb:
+    image: chromadb/chroma
+    container_name: assistant_chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./data/chromadb:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=FALSE
+      - ALLOW_RESET=TRUE
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng
+    container_name: atlas_searxng
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./config/searxng:/etc/searxng
+    environment:
+      - SEARXNG_SECRET_KEY=atlas_secret_key_change_me
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

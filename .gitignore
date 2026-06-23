@@ -1,0 +1,115 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Environnements virtuels ===
+.venv/
+venv/
+env/
+ENV/
+
+# === Claude Code / IDE ===
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# === Données runtime sensibles (chemins relatifs et assistant-bureau/) ===
+data/chromadb/
+data/habits.db
+data/audit_log.jsonl
+data/atlas_actions.jsonl
+data/schedules.json
+data/triggers.json
+data/file_index.json
+data/file_reorg_history.jsonl
+data/atlas.lock
+data/debug/
+data/screenshots/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/*.jsonl
+data/*.lock
+
+assistant-bureau/data/chromadb/
+assistant-bureau/data/habits.db
+assistant-bureau/data/audit_log.jsonl
+assistant-bureau/data/atlas_actions.jsonl
+assistant-bureau/data/schedules.json
+assistant-bureau/data/triggers.json
+assistant-bureau/data/file_index.json
+assistant-bureau/data/file_reorg_history.jsonl
+assistant-bureau/data/atlas.lock
+assistant-bureau/data/debug/
+assistant-bureau/data/screenshots/
+assistant-bureau/data/*.db
+assistant-bureau/data/*.sqlite
+assistant-bureau/data/*.sqlite3
+assistant-bureau/data/*.jsonl
+assistant-bureau/data/*.lock
+
+# === Rapports de profiling avec chemins système ===
+assistant-bureau/rapport_ollama_config.txt
+assistant-bureau/rapport_profile_minicpm.txt
+rapport_ollama_config.txt
+rapport_profile_minicpm.txt
+
+# === Workflow perso (à valider au cas par cas) ===
+assistant-bureau/data/workflows/workflow_discord_spotify.yaml
+
+# === Modèles ML lourds (jamais sur Git) ===
+models/
+*.onnx
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# === Logs ===
+*.log
+logs/
+
+# === Secrets et config locale ===
+.env
+.env.local
+.env.*.local
+secrets/
+*_secret*
+*_credentials*
+*.key
+*.pem
+config/settings.local.json
+config/oauth_tokens/
+assistant-bureau/config/oauth_tokens/
+
+# === Audit results perso ===
+assistant-bureau/tests/audit_results_v22.json
+
+# === Docker ===
+docker-compose.override.yml
+
+# === Build / dist ===
+build/
+dist/
+*.spec
+
+# === OS ===
+desktop.ini
+
+# === Notes perso / brouillons ===
+notes_perso/
+WIP_*
+TODO_perso.md

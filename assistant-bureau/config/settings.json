@@ -1,0 +1,125 @@
+{
+    "ollama": {
+        "base_url": "http://127.0.0.1:11434",
+        "model": "qwen2.5:7b",
+        "_previous_model": "qwen2.5:14b",
+        "_migration_reason": "VRAM RTX 3050 8GB — Réunion Atlas #4 du 29/04/2026",
+        "keep_alive": "10m",
+        "temperature": 0.7,
+        "context_window": 8192,
+        "stream_timeout_seconds": 90
+    },
+    "assistant": {
+        "name": "Atlas",
+        "language": "fr",
+        "log_actions": true,
+        "confirm_destructive": true,
+        "power_user_mode": false
+    },
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8550
+    },
+    "protection_rules": {
+        "intouchable_gpu_threshold": 50.0,
+        "intouchable_cpu_threshold": 60.0,
+        "idle_timeout_minutes": 10,
+        "always_protected": ["explorer.exe", "svchost.exe", "csrss.exe", "lsass.exe", "System", "winlogon.exe"],
+        "game_executables_keywords": ["game", "steam", "epic", "battle.net", "riot", "valorant", "helldivers", "gog"]
+    },
+    "memory": {
+        "chroma_host": "localhost",
+        "chroma_port": 8001,
+        "collection_name": "atlas_memory",
+        "recall_top_k": 5,
+        "habit_detection_threshold": 3
+    },
+    "web": {
+        "searxng_url": "http://localhost:8888",
+        "search_timeout_seconds": 8,
+        "searxng_timeout_seconds": 3,
+        "ddgs_timeout_seconds": 5,
+        "search_log_failures": true,
+        "reader_max_chars": 8000,
+        "browser_action_timeout_seconds": 30
+    },
+    "browser_bridge": {
+        "port": 9999,
+        "enabled": true
+    },
+    "steam_games": {
+        "helldivers 2": "553850",
+        "counter-strike 2": "730",
+        "dota 2": "570",
+        "team fortress 2": "440",
+        "portal 2": "620",
+        "left 4 dead 2": "550",
+        "garry's mod": "4000",
+        "rust": "252490",
+        "terraria": "105600",
+        "stardew valley": "413150",
+        "the witcher 3": "292030",
+        "cyberpunk 2077": "1091500",
+        "elden ring": "1245620",
+        "baldur's gate 3": "1086940",
+        "palworld": "1623730"
+    },
+    "powershell_allowlist": [
+        "Get-Process", "Get-Service", "Get-NetAdapter",
+        "Set-DisplayResolution", "Restart-Service", "Get-Disk",
+        "Get-NetIPAddress", "Get-CimInstance", "Get-ItemProperty",
+        "Get-WmiObject", "powercfg", "netsh",
+        "Set-ItemProperty", "Remove-ItemProperty",
+        "Clear-RecycleBin", "Write-Output", "ConvertTo-Json",
+        "Select-Object", "Where-Object", "Sort-Object",
+        "Test-Path"
+    ],
+    "powershell_denylist": [
+        "Remove-Item", "Format-Volume", "Format-Disk",
+        "Stop-Computer", "Restart-Computer",
+        "Invoke-Expression", "iex",
+        "DownloadFile", "WebClient", "Invoke-WebRequest", "Invoke-RestMethod",
+        "Start-BitsTransfer",
+        "New-Object System.Net",
+        "Set-ExecutionPolicy",
+        "reg delete", "reg add",
+        "Remove-PSDrive", "Clear-Content",
+        "del ", "rmdir", "rd "
+    ],
+    "automation": {
+        "trigger_check_interval_seconds": 10,
+        "max_active_triggers": 20,
+        "min_cooldown_seconds": 60
+    },
+    "filesystem_assistant": {
+        "enabled": false,
+        "scan_interval_seconds": 600,
+        "max_files_per_scan": 10000,
+        "scan_roots": [
+            "%USERPROFILE%\\Desktop",
+            "%USERPROFILE%\\Documents",
+            "%USERPROFILE%\\Downloads"
+        ],
+        "exclude_dirs": [
+            "%USERPROFILE%\\AppData",
+            "%USERPROFILE%\\.cache"
+        ]
+    },
+    "grounding": {
+        "vision_enabled": false,
+        "vision_model": "minicpm-v:latest",
+        "_note": "Désactivé par défaut depuis Réunion Atlas #4. OCR Tesseract suffit pour 95%+ des cas. Réactiver si Tesseract ne trouve pas l'élément."
+    },
+    "voice": {
+        "enabled": false,
+        "wake_word_model": "hey_mycroft",
+        "wake_word_threshold": 0.5,
+        "stt_model": "base",
+        "stt_language": "fr",
+        "stt_device": "cuda",
+        "tts_voice": "fr_FR-upmc-medium",
+        "max_recording_seconds": 10,
+        "silence_threshold_seconds": 1.5,
+        "_note_porcupine": "Migration vers Porcupine possible en remplaçant _init_wake_word() — clé PORCUPINE_ACCESS_KEY requise"
+    }
+}
