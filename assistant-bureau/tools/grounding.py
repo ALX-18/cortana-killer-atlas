@@ -53,11 +53,14 @@ def _is_vision_enabled() -> bool:
 
 
 # v5.1 corrective — per-layer hard timeouts and global cap
+# v6.0 F2 — ajout EasyOCR (fallback Tesseract) + heuristiques Electron
 GROUNDING_LAYER_TIMEOUT = {
     "uia": 3.0,        # 3s — UIA est rapide ou échoue rapide
     "cache": 0.5,      # 0.5s — purement local
     "ocr": 5.0,        # 5s — Tesseract sur fenêtre
-    "vision": 8.0,     # 8s — MiniCPM-V hard cap
+    "easyocr": 4.0,    # 4s — EasyOCR PyTorch fallback (F2 v6.0)
+    "electron_heuristics": 0.5,  # 0.5s — lecture YAML + clic (F2 v6.0)
+    "vision": 8.0,     # 8s — MiniCPM-V hard cap (gated off)
     "steam_nav_heuristic": 1.0,  # 1s — calcul de coordonnées + clic
 }
 GROUNDING_TOTAL_TIMEOUT = 20.0  # cap absolu, toutes couches confondues
@@ -985,6 +988,144 @@ async def _try_ocr(app_title: str, element_name: str) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------- #
+#  Couche 3.5 : EasyOCR (fallback Tesseract) — F2 v6.0
+# --------------------------------------------------------------------------- #
+
+_EASYOCR_READER = None
+_EASYOCR_ATTEMPTED = False
+
+
+def _get_easyocr_reader():
+    """Charge le reader EasyOCR une seule fois (fr+en). None si indisponible."""
+    global _EASYOCR_READER, _EASYOCR_ATTEMPTED
+    if _EASYOCR_READER is not None or _EASYOCR_ATTEMPTED:
+        return _EASYOCR_READER
+    _EASYOCR_ATTEMPTED = True
+    try:
+        import easyocr
+        # GPU auto-détecté ; fr+en
+        _EASYOCR_READER = easyocr.Reader(["fr", "en"], verbose=False)
+        logger.info("[EASYOCR] Reader chargé (fr+en).")
+    except Exception as e:
+        logger.warning("[EASYOCR] Indisponible (%s).", e)
+        _EASYOCR_READER = None
+    return _EASYOCR_READER
+
+
+async def _try_easyocr(app_title: str, element_name: str) -> Optional[dict]:
+    """Fallback OCR via EasyOCR (PyTorch) quand Tesseract échoue."""
+    reader = _get_easyocr_reader()
+    if reader is None:
+        return None
+    try:
+        import numpy as np
+        import pygetwindow as gw  # noqa: F401
+
+        windows = _find_candidate_windows(app_title)
+        w = _choose_best_window(windows, app_title)
+        if w is None:
+            return None
+        if getattr(w, "isMinimized", False):
+            w.restore()
+            time.sleep(0.2)
+
+        captured = _capture_window_screenshot(w)
+        if captured is None:
+            return None
+        screenshot, origin_x, origin_y = captured
+
+        title_norm = _normalize_text(app_title)
+        is_steam = "steam" in title_norm
+        aliases = (
+            set(_normalize_text(a) for a in _steam_label_aliases(element_name))
+            if is_steam else {_normalize_text(element_name)}
+        )
+
+        results = reader.readtext(np.array(screenshot))
+        best = None
+        best_ratio = 0.0
+        detected = []
+        for (bbox, text, conf) in results:
+            tnorm = _normalize_text(text)
+            if not tnorm:
+                continue
+            detected.append(f"{text}({conf:.2f})")
+            ratio = max(SequenceMatcher(None, tnorm, a).ratio() for a in aliases)
+            contains = 0.15 if any(a in tnorm or tnorm in a for a in aliases) else 0.0
+            score = ratio + contains
+            if score > best_ratio and conf >= 0.3:
+                best_ratio = score
+                xs = [p[0] for p in bbox]
+                ys = [p[1] for p in bbox]
+                cx = int(sum(xs) / 4) + origin_x
+                cy = int(sum(ys) / 4) + origin_y
+                best = (cx, cy)
+
+        logger.info("[EASYOCR] detected=%d top=%s", len(detected), detected[:20])
+
+        if best and best_ratio >= 0.75:
+            x, y = best
+            if _point_in_bounds(x, y, _get_virtual_screen_bounds()):
+                pyautogui.click(x=x, y=y)
+                if not is_steam:
+                    _set_cached(app_title, element_name, (x, y),
+                                window_rect=(int(getattr(w, "left", 0)), int(getattr(w, "top", 0)),
+                                             int(getattr(w, "width", 0)), int(getattr(w, "height", 0))))
+                return {
+                    "success": True, "method": "easyocr",
+                    "message": f"Clic EasyOCR sur '{element_name}' à ({x}, {y}), score={best_ratio:.2f}.",
+                    "coords": (x, y), "easyocr_score": round(best_ratio, 2),
+                }
+        return None
+    except Exception as e:
+        logger.debug("[EASYOCR] Erreur : %s", e)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+#  Couche heuristiques Electron (conditionnelle) — F2 v6.0
+# --------------------------------------------------------------------------- #
+
+async def _try_electron_heuristics(app_title: str, element_name: str) -> Optional[dict]:
+    """Clic d'icône sans texte via positions heuristiques (Discord/Slack/VSCode)."""
+    try:
+        from tools.electron_heuristics import resolve_icon_point, is_electron_heuristic_app
+
+        if not is_electron_heuristic_app(app_title):
+            return None
+
+        windows = _find_candidate_windows(app_title)
+        w = _choose_best_window(windows, app_title)
+        if w is None:
+            return None
+        if getattr(w, "isMinimized", False):
+            w.restore()
+            time.sleep(0.2)
+
+        rect = (int(getattr(w, "left", 0)), int(getattr(w, "top", 0)),
+                int(getattr(w, "width", 0)), int(getattr(w, "height", 0)))
+        point = resolve_icon_point(app_title, element_name, rect)
+        if point is None:
+            logger.info("[ELECTRON] Pas d'icône heuristique pour '%s' dans '%s'", element_name, app_title)
+            return None
+
+        x, y = point["x"], point["y"]
+        in_window = (rect[0] <= x < rect[0] + rect[2] and rect[1] <= y < rect[1] + rect[3])
+        if not in_window or not _point_in_bounds(x, y, _get_virtual_screen_bounds()):
+            return None
+
+        pyautogui.click(x=x, y=y)
+        return {
+            "success": True, "method": "electron_heuristics",
+            "message": f"Clic heuristique Electron '{point['icon']}' ({point['app']}) à ({x}, {y}).",
+            "coords": (x, y),
+        }
+    except Exception as e:
+        logger.debug("[ELECTRON] Erreur : %s", e)
+        return None
+
+
+# --------------------------------------------------------------------------- #
 #  Couche 4 : Vision (MiniCPM-V) — placeholder
 # --------------------------------------------------------------------------- #
 
@@ -1313,19 +1454,25 @@ def _build_layers(app_type: str, app_title: str = ""):
     has_minicpm = _has_local_minicpm()
     vision_on = _is_vision_enabled()
 
+    # F2 v6.0 — couche EasyOCR (fallback Tesseract), vision en option (gated off)
+    tail = [_try_easyocr] + ([_try_vision] if vision_on else [])
+
     if app_type == "game":
         if is_steam:
             if vision_on and has_minicpm:
-                return [_try_cache, _try_ocr, _try_vision]
-            return [_try_cache, _try_ocr, _try_steam_nav_heuristic]
-        return [_try_cache] + ([_try_vision] if vision_on else [])
+                return [_try_cache, _try_ocr, _try_easyocr, _try_vision]
+            return [_try_cache, _try_ocr, _try_easyocr, _try_steam_nav_heuristic]
+        return [_try_cache] + tail
     if app_type == "electron":
+        # F2 v6.0 — heuristiques Electron (Discord/Slack/VSCode) après OCR+EasyOCR
+        from tools.electron_heuristics import is_electron_heuristic_app
+        electron_tail = [_try_electron_heuristics] if is_electron_heuristic_app(app_title) else []
         if is_steam:
             if vision_on and has_minicpm:
-                return [_try_cache, _try_ocr, _try_vision]
-            return [_try_cache, _try_ocr, _try_steam_nav_heuristic]
-        return [_try_cache, _try_ocr] + ([_try_vision] if vision_on else [])
-    return [_try_uia, _try_cache, _try_ocr] + ([_try_vision] if vision_on else [])
+                return [_try_cache, _try_ocr, _try_easyocr, _try_vision]
+            return [_try_cache, _try_ocr, _try_easyocr, _try_steam_nav_heuristic]
+        return [_try_cache, _try_ocr, _try_easyocr] + electron_tail + ([_try_vision] if vision_on else [])
+    return [_try_uia, _try_cache, _try_ocr] + tail
 
 
 # --------------------------------------------------------------------------- #

@@ -15,7 +15,7 @@ from fastapi import Body
 from fastapi.responses import StreamingResponse
 import httpx
 
-from api.models import ChatRequest, ConfirmationResponse
+from api.models import ChatRequest, ConfirmationResponse, MemoryIngestRequest
 from core.context_monitor import collect_context
 from core.ollama_client import chat_stream, chat_full, OllamaStreamTimeout, STREAM_TIMEOUT
 from core.intent_engine import process_ai_response, execute_confirmed, save_rejection, get_execution_engine
@@ -93,7 +93,7 @@ async def chat_endpoint(req: ChatRequest):
     ws.update_from_context(context)
 
     mem = get_memory_manager()
-    memories = mem.recall_texts(req.message, top_k=5)
+    memories = mem.recall_for_prompt(req.message)
     mem.add_to_session("user", req.message)
     ws.add_to_history("user", req.message)
 
@@ -124,8 +124,23 @@ async def chat_endpoint(req: ChatRequest):
                 "ERR_MODEL_UNAVAILABLE",
                 details=str(e),
             )
+        # P2 v6.0.1 — garde linguistique : retry FR si dérive non-latine détectée
+        from core.ollama_client import contains_non_latin_script, chat_full
+        if contains_non_latin_script(full_response):
+            logger.warning("[LANG] Dérive détectée sur /chat — retry FR strict.")
+            try:
+                full_response = await chat_full(req.message, context, req.history, memories=memories)
+            except Exception:
+                from core.ollama_client import LANG_FALLBACK_MESSAGE
+                full_response = LANG_FALLBACK_MESSAGE
         mem.add_to_session("assistant", full_response)
         ws.add_to_history("assistant", full_response)
+        # F4 — ingestion conversation (long terme, non bloquant si échec)
+        try:
+            mem.ingest_conversation(req.message, full_response,
+                                    intent_category=intent.category, success=True)
+        except Exception as _e:
+            logger.debug("Ingestion conversation échouée : %s", _e)
         return {"type": "text", "message": full_response, "tool_results": []}
 
     # --- Step 3: Action execution ---
@@ -152,6 +167,11 @@ async def chat_endpoint(req: ChatRequest):
                 return _api_error("Le modèle local est indisponible.", "ERR_MODEL_UNAVAILABLE")
             mem.add_to_session("assistant", full_response)
             ws.add_to_history("assistant", full_response)
+            try:
+                mem.ingest_conversation(req.message, full_response,
+                                        intent_category=intent.category, success=True)
+            except Exception as _e:
+                logger.debug("Ingestion conversation échouée : %s", _e)
             return {"type": "text", "message": full_response, "tool_results": []}
 
         result = await engine.execute(resolved, context)
@@ -206,7 +226,7 @@ async def chat_stream_endpoint(req: ChatRequest):
     ws.update_from_context(context)
 
     mem = get_memory_manager()
-    memories = mem.recall_texts(req.message, top_k=5)
+    memories = mem.recall_for_prompt(req.message)
     mem.add_to_session("user", req.message)
     ws.add_to_history("user", req.message)
 
@@ -660,6 +680,23 @@ async def memory_reconnect():
     mem = get_memory_manager()
     mem.reconnect()
     return {"connected": mem.is_connected()}
+
+
+@router.post("/memory/ingest")
+async def memory_ingest(req: MemoryIngestRequest):
+    """
+    Ingère un document (.txt/.md/.pdf) dans la mémoire long terme (F4 v6.0).
+    Extraction → chunking (512/64) → embeddings e5 → partition documents.
+    """
+    from tools.memory_ingest import ingest_file
+    mem = get_memory_manager()
+    if not mem.is_connected():
+        raise HTTPException(status_code=503, detail="ChromaDB indisponible — ingestion impossible.")
+    result = ingest_file(req.path, memory_manager=mem)
+    if not result["success"]:
+        # 422 pour erreurs utilisateur (format/fichier), 200 sinon
+        raise HTTPException(status_code=422, detail=result["message"])
+    return result
 
 
 # --------------------------------------------------------------------------- #

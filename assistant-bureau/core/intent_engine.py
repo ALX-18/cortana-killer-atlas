@@ -167,6 +167,9 @@ TOOL_HANDLERS = {
     "ui_click_element": lambda args: _run_grounding(args),
     "redo_last_action": lambda args: _run_redo(args),
 
+    # --- F2 v6.0 : Lecture d'écran (CU-1/3/4/5) --- #
+    "screen_read": lambda args: _run_screen_read(args),
+
     # --- MVP 3.0 : Automation --- #
     "schedule_add": lambda args: _run_schedule_add(args),
     "schedule_list": lambda args: _run_schedule_list(args),
@@ -201,12 +204,19 @@ VALID_ACTIONS = set(TOOL_HANDLERS.keys())
 
 def _run_grounding(args: dict):
     """Wrapper synchrone → retourne un awaitable pour le grounding stack."""
-    import asyncio
     from tools.grounding import find_and_click
+    exclude = args.get("_exclude_methods")
     return find_and_click(
         app_title=args.get("app_title", ""),
         element_name=args.get("element_name", ""),
+        exclude_methods=set(exclude) if exclude else None,
     )
+
+
+def _run_screen_read(args: dict):
+    """Wrapper async → lecture d'écran (F2 v6.0)."""
+    from tools.screen_reader import read_screen
+    return read_screen(mode=args.get("mode", "read"), summarize=args.get("summarize", True))
 
 
 def _run_redo(args: dict):
@@ -518,6 +528,26 @@ class ExecutionEngine:
         if tool_name == "__conversation__":
             return {"status": "conversation", "message": params.get("message", "")}
 
+        # F4 v6.0 — apprentissage erreurs : mitigation pré-action (skip_layer appris)
+        learned_mitigation = None
+        if tool_name == "ui_click_element":
+            try:
+                from core.error_learning import get_error_learning
+                el = get_error_learning()
+                intent = getattr(resolved, "intent", None)
+                learned_mitigation = el.lookup_mitigation(
+                    intent_category=intent.category if intent else "interaction",
+                    target=params.get("element_name", ""),
+                    app_context=params.get("app_title", ""),
+                )
+                if learned_mitigation and learned_mitigation.get("strategy") == "skip_layer":
+                    skip = learned_mitigation.get("skip_layer")
+                    if skip:
+                        params = {**params, "_exclude_methods": [skip]}
+                        logger.info("[ENGINE] Mitigation apprise : skip couche '%s'", skip)
+            except Exception as _e:
+                logger.debug("Lookup mitigation échoué : %s", _e)
+
         idempotent_result = await self._check_idempotence(tool_name, params, context)
         if idempotent_result is not None:
             result = idempotent_result
@@ -635,6 +665,29 @@ class ExecutionEngine:
             )
         except Exception as e:
             logger.debug("Structured log failed: %s", e)
+
+        # F4 v6.0 — apprentissage erreurs : enregistrer l'échec pour mitigation future
+        if result.get("status") in ("error", "replan_required") or result.get("verification_failed"):
+            try:
+                from core.error_learning import get_error_learning, classify_cause
+                intent = getattr(resolved, "intent", None)
+                cause = classify_cause(
+                    result.get("message") or result.get("replan_reason"),
+                    result.get("error_code"),
+                )
+                layer_failed = None
+                if tool_name == "ui_click_element":
+                    inner = result.get("result") or {}
+                    layer_failed = inner.get("method")
+                get_error_learning().record_failure(
+                    intent_category=intent.category if intent else "unknown",
+                    target=params.get("element_name") or params.get("name") or params.get("title") or "",
+                    app_context=params.get("app_title") or context.get("foreground_window", {}).get("title", ""),
+                    cause=cause,
+                    grounding_layer_failed=layer_failed,
+                )
+            except Exception as _e:
+                logger.debug("Record failure échoué : %s", _e)
 
         return result
 

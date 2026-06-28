@@ -32,7 +32,20 @@
         "chroma_port": 8001,
         "collection_name": "atlas_memory",
         "recall_top_k": 5,
-        "habit_detection_threshold": 3
+        "habit_detection_threshold": 3,
+        "embedding_model": "intfloat/multilingual-e5-base",
+        "retrieval_top_k": 3,
+        "retrieval_min_score": 0.5,
+        "conversations": {
+            "max_entries": 10000
+        },
+        "collections": {
+            "conversations": "atlas_conversations",
+            "documents": "atlas_documents",
+            "context_apps": "atlas_context_apps",
+            "habits": "atlas_habits",
+            "errors": "atlas_errors"
+        }
     },
     "web": {
         "searxng_url": "http://localhost:8888",

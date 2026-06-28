@@ -16,6 +16,10 @@ class ConfirmationResponse(BaseModel):
     accepted: bool
 
 
+class MemoryIngestRequest(BaseModel):
+    path: str = Field(..., min_length=1, description="Chemin absolu du fichier à ingérer (.txt/.md/.pdf)")
+
+
 class ToolCallResult(BaseModel):
     tool: str
     args: dict

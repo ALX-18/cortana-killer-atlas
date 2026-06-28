@@ -1,0 +1,37 @@
+# Heuristiques Electron — F2 v6.0
+#
+# Positions d'icônes connues pour les apps Electron où l'OCR échoue souvent
+# (icônes sans texte). Coordonnées exprimées relativement à la fenêtre de l'app :
+#   - anchor : coin/zone de référence dans la fenêtre
+#       top-left | top-right | bottom-left | bottom-right | center
+#   - offset_x / offset_y : décalage en pixels depuis l'ancre
+#       (positif = vers la droite / vers le bas)
+#
+# Activation : si process.name est listé ET que l'OCR a échoué → clic heuristique.
+# App non listée → message clair, fallback grounding standard (pas de crash).
+
+discord:
+  process_name: "Discord.exe"
+  icons:
+    parametres:
+      anchor: bottom-left
+      offset_x: 220
+      offset_y: -18
+      aliases: ["paramètres", "parametres", "settings", "engrenage", "réglages", "reglages", "configuration"]
+    accueil:
+      anchor: top-left
+      offset_x: 36
+      offset_y: 40
+      aliases: ["accueil", "home"]
+
+slack:
+  process_name: "Slack.exe"
+  icons:
+    # à compléter sem 25 selon besoins terrain
+    {}
+
+vscode:
+  process_name: "Code.exe"
+  icons:
+    # à compléter selon besoins terrain
+    {}

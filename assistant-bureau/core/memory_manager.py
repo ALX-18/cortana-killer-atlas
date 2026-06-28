@@ -34,8 +34,21 @@ CHROMA_HOST: str = _cfg.get("chroma_host", "localhost")
 CHROMA_PORT: int = _cfg.get("chroma_port", 8001)
 COLLECTION_NAME: str = _cfg.get("collection_name", "atlas_memory")
 
-# Catégories valides
+# Catégories valides (mémoire legacy)
 CATEGORIES = {"habit", "preference", "action_history", "correction"}
+
+# --- F4 v6.0 : partitionnement + retrieval ---
+_COLL_CFG = _cfg.get("collections", {})
+PARTITIONS = {
+    "conversations": _COLL_CFG.get("conversations", "atlas_conversations"),
+    "documents": _COLL_CFG.get("documents", "atlas_documents"),
+    "context_apps": _COLL_CFG.get("context_apps", "atlas_context_apps"),
+    "habits": _COLL_CFG.get("habits", "atlas_habits"),
+    "errors": _COLL_CFG.get("errors", "atlas_errors"),
+}
+RETRIEVAL_TOP_K: int = int(_cfg.get("retrieval_top_k", 3))
+RETRIEVAL_MIN_SCORE: float = float(_cfg.get("retrieval_min_score", 0.5))
+CONVERSATIONS_MAX: int = int(_cfg.get("conversations", {}).get("max_entries", 10000))
 
 
 # --------------------------------------------------------------------------- #
@@ -54,6 +67,7 @@ class MemoryManager:
         # -- Long terme (ChromaDB) --
         self._client: Optional[chromadb.HttpClient] = None
         self._collection = None
+        self._partitions: dict[str, Any] = {}   # F4 — collections partitionnées
         self._connected = False
         self._connect()
 
@@ -74,8 +88,18 @@ class MemoryManager:
                 name=COLLECTION_NAME,
                 metadata={"hnsw:space": "cosine"},
             )
+            # F4 v6.0 — collections partitionnées (embeddings e5 fournis explicitement)
+            self._partitions = {}
+            for key, coll_name in PARTITIONS.items():
+                self._partitions[key] = self._client.get_or_create_collection(
+                    name=coll_name,
+                    metadata={"hnsw:space": "cosine"},
+                )
             self._connected = True
-            logger.info("ChromaDB connecté — %s:%d — collection '%s'", CHROMA_HOST, CHROMA_PORT, COLLECTION_NAME)
+            logger.info(
+                "ChromaDB connecté — %s:%d — collection '%s' + %d partitions",
+                CHROMA_HOST, CHROMA_PORT, COLLECTION_NAME, len(self._partitions),
+            )
         except Exception as e:
             self._connected = False
             logger.warning("ChromaDB indisponible (%s). Mémoire long terme désactivée.", e)
@@ -214,6 +238,36 @@ class MemoryManager:
         memories = self.recall(query, top_k)
         return [m["content"] for m in memories]
 
+    def recall_for_prompt(self, query: str) -> list[str]:
+        """
+        F4 v6.0 — Retrieval combiné pour injection dans le system prompt.
+        Croise la mémoire legacy + partitions conversations/documents, filtre par
+        score, dédoublonne. Vide si rien au-dessus du seuil (injection silencieuse).
+        """
+        if not self._connected:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+
+        # Partitions sémantiques (e5) — documents puis conversations
+        for partition in ("documents", "conversations"):
+            for hit in self.retrieve(query, partition=partition,
+                                     top_k=RETRIEVAL_TOP_K, min_score=RETRIEVAL_MIN_SCORE):
+                txt = hit["content"]
+                key = txt[:120]
+                if key not in seen:
+                    seen.add(key)
+                    out.append(txt)
+
+        # Mémoire legacy (habitudes/préférences/corrections) — complément
+        for txt in self.recall_texts(query, top_k=3):
+            key = txt[:120]
+            if key not in seen:
+                seen.add(key)
+                out.append(txt)
+
+        return out[:6]
+
     # ------------------------------------------------------------------ #
     #  Mémoire long terme — FORGET
     # ------------------------------------------------------------------ #
@@ -249,6 +303,189 @@ class MemoryManager:
             return 0
 
     # ------------------------------------------------------------------ #
+    #  F4 v6.0 — Partitions : helpers embeddings
+    # ------------------------------------------------------------------ #
+
+    def _sanitize_meta(self, metadata: Optional[dict]) -> dict:
+        """ChromaDB n'accepte que str/int/float/bool en métadonnée."""
+        meta: dict[str, Any] = {}
+        for k, v in (metadata or {}).items():
+            if v is None:
+                continue
+            meta[k] = v if isinstance(v, (str, int, float, bool)) else str(v)
+        return meta
+
+    def _add_to_partition(
+        self,
+        partition: str,
+        doc_id: str,
+        content: str,
+        metadata: Optional[dict] = None,
+    ) -> bool:
+        """Ajoute un document à une partition, embeddings e5 si dispo."""
+        if not self._connected or partition not in self._partitions:
+            return False
+        from core import embeddings as emb
+
+        meta = self._sanitize_meta(metadata)
+        meta.setdefault("created_at", time.time())
+        meta.setdefault("timestamp", datetime.now().isoformat())
+        try:
+            vecs = emb.embed_passages([content])
+            if vecs is not None:
+                self._partitions[partition].add(
+                    ids=[doc_id], documents=[content],
+                    metadatas=[meta], embeddings=vecs,
+                )
+            else:
+                # Dégradation : embedder ChromaDB par défaut
+                self._partitions[partition].add(
+                    ids=[doc_id], documents=[content], metadatas=[meta],
+                )
+            return True
+        except Exception as e:
+            logger.error("Erreur ajout partition '%s' : %s", partition, e)
+            return False
+
+    def retrieve(
+        self,
+        query: str,
+        partition: str = "conversations",
+        top_k: int = RETRIEVAL_TOP_K,
+        min_score: float = RETRIEVAL_MIN_SCORE,
+    ) -> list[dict]:
+        """
+        Recherche dans une partition. Retourne les hits avec score >= min_score.
+        Format : {"id", "content", "score", "metadata"}.
+        """
+        if not self._connected or partition not in self._partitions:
+            return []
+        from core import embeddings as emb
+
+        coll = self._partitions[partition]
+        try:
+            qvec = emb.embed_query(query)
+            if qvec is not None:
+                results = coll.query(query_embeddings=[qvec], n_results=top_k)
+            else:
+                results = coll.query(query_texts=[query], n_results=top_k)
+        except Exception as e:
+            logger.error("Erreur retrieve partition '%s' : %s", partition, e)
+            return []
+
+        hits: list[dict] = []
+        if results and results.get("documents") and results["documents"][0]:
+            for i, doc in enumerate(results["documents"][0]):
+                dist = results["distances"][0][i] if results.get("distances") else 0.0
+                score = round(1 - dist, 3)
+                if score < min_score:
+                    continue
+                meta = results["metadatas"][0][i] if results.get("metadatas") else {}
+                hits.append({
+                    "id": results["ids"][0][i],
+                    "content": doc,
+                    "score": score,
+                    "metadata": meta,
+                })
+        return hits
+
+    # ------------------------------------------------------------------ #
+    #  F4 — Ingestion conversations (async-friendly, FIFO)
+    # ------------------------------------------------------------------ #
+
+    def ingest_conversation(
+        self,
+        user_msg: str,
+        assistant_response: str,
+        intent_category: str = "unknown",
+        success: bool = True,
+    ) -> Optional[str]:
+        """Stocke un échange (user, assistant) dans la partition conversations."""
+        if not self._connected or not user_msg:
+            return None
+        conv_id = f"conv_{uuid.uuid4().hex[:12]}"
+        content = f"Utilisateur: {user_msg}\nAtlas: {assistant_response}"
+        ok = self._add_to_partition(
+            "conversations", conv_id, content,
+            {"intent_category": intent_category, "success": bool(success),
+             "user_msg": user_msg[:500]},
+        )
+        if not ok:
+            return None
+        self._fifo_rotate("conversations", CONVERSATIONS_MAX)
+        return conv_id
+
+    def _fifo_rotate(self, partition: str, max_entries: int):
+        """Supprime les plus anciennes entrées au-delà de max_entries (FIFO)."""
+        if not self._connected or partition not in self._partitions:
+            return
+        coll = self._partitions[partition]
+        try:
+            total = coll.count()
+            if total <= max_entries:
+                return
+            to_remove = total - max_entries
+            # Récupère tout avec created_at, trie, supprime les plus vieux
+            alld = coll.get(include=["metadatas"])
+            ids = alld.get("ids", [])
+            metas = alld.get("metadatas", []) or []
+            paired = sorted(
+                zip(ids, [m.get("created_at", 0) for m in metas]),
+                key=lambda p: p[1],
+            )
+            old_ids = [pid for pid, _ in paired[:to_remove]]
+            if old_ids:
+                coll.delete(ids=old_ids)
+                logger.info("FIFO rotation '%s' : %d entrées supprimées", partition, len(old_ids))
+        except Exception as e:
+            logger.debug("FIFO rotation '%s' échec : %s", partition, e)
+
+    # ------------------------------------------------------------------ #
+    #  F4 — Ingestion documents (chunks)
+    # ------------------------------------------------------------------ #
+
+    def ingest_document_chunks(
+        self,
+        chunks: list[str],
+        source: str,
+        mime_type: str = "text/plain",
+    ) -> int:
+        """Stocke des chunks de document dans la partition documents. Retourne le nb stockés."""
+        if not self._connected or not chunks:
+            return 0
+        stored = 0
+        ingested_at = datetime.now().isoformat()
+        for idx, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+            doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+            ok = self._add_to_partition(
+                "documents", doc_id, chunk,
+                {"source": source, "mime_type": mime_type,
+                 "chunk_index": idx, "ingested_at": ingested_at},
+            )
+            if ok:
+                stored += 1
+        logger.info("Ingestion document '%s' : %d/%d chunks stockés", source, stored, len(chunks))
+        return stored
+
+    # ------------------------------------------------------------------ #
+    #  F4 — Errors partition (utilisé par error_learning)
+    # ------------------------------------------------------------------ #
+
+    def store_error(self, signature: str, metadata: dict) -> Optional[str]:
+        """Stocke une signature d'échec dans la partition errors."""
+        if not self._connected:
+            return None
+        err_id = f"err_{uuid.uuid4().hex[:12]}"
+        ok = self._add_to_partition("errors", err_id, signature, metadata)
+        return err_id if ok else None
+
+    def query_errors(self, signature: str, top_k: int = 1, min_score: float = 0.85) -> list[dict]:
+        """Recherche un échec similaire passé. min_score élevé = match strict."""
+        return self.retrieve(signature, partition="errors", top_k=top_k, min_score=min_score)
+
+    # ------------------------------------------------------------------ #
     #  Stats
     # ------------------------------------------------------------------ #
 
@@ -270,6 +507,15 @@ class MemoryManager:
                         result[f"count_{cat}"] = len(cat_results["ids"])
                     except Exception:
                         result[f"count_{cat}"] = 0
+
+                # F4 — compteurs partitions
+                partitions_count = {}
+                for key, coll in self._partitions.items():
+                    try:
+                        partitions_count[key] = coll.count()
+                    except Exception:
+                        partitions_count[key] = -1
+                result["partitions"] = partitions_count
             except Exception:
                 result["total_memories"] = -1
         return result

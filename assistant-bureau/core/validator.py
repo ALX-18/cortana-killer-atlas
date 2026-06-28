@@ -113,6 +113,17 @@ class Validator:
                 intent=intent,
             )
 
+        # --- F2 v6.0 : Vision / lecture d'écran ---
+        if category == "vision" and verb == "read_screen":
+            return ResolvedAction(
+                tool="screen_read",
+                params={
+                    "mode": intent.params.get("mode", "read"),
+                    "summarize": intent.params.get("summarize", True),
+                },
+                intent=intent,
+            )
+
         # --- Lookup outil dans INTENT_CATEGORIES ---
         cat_data = INTENT_CATEGORIES.get(category, {})
         tools_map = cat_data.get("tools", {})

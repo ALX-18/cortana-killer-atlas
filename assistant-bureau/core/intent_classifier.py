@@ -298,6 +298,68 @@ class IntentClassifier:
         raw = user_input.strip()
         normalized = raw.lower()
 
+        # --- F2 v6.0 — Lecture d'écran (CU-1/3/4/5) ---
+        # CU-3 "que fais-je actuellement" → mode activity
+        if any(p in normalized for p in [
+            "que fais-je", "que fais je", "qu'est-ce que je fais", "quest-ce que je fais",
+            "je fais quoi", "qu'est ce que je fais",
+        ]):
+            return IntentResult(
+                category="vision", verb="read_screen", target=None,
+                params={"mode": "activity", "summarize": True},
+                confidence=0.95, is_complex=False, raw_input=raw,
+            )
+        # CU-1/4/5 "lis-moi l'écran", "résume cette page", "que vois-tu"
+        screen_read_markers = [
+            "lis-moi ce qui est à l", "lis moi ce qui est a l", "lis-moi l'écran", "lis moi l'ecran",
+            "lis l'écran", "lis l'ecran", "résume cette page", "resume cette page",
+            "résume la page", "resume la page", "résume l'écran", "resume l'ecran",
+            "que vois-tu", "que vois tu", "qu'est-ce que tu vois", "quest-ce que tu vois",
+            "qu'est-ce qu'il y a à l'écran", "ce qui est affiché", "ce qui est affiche",
+        ]
+        if any(p in normalized for p in screen_read_markers):
+            return IntentResult(
+                category="vision", verb="read_screen", target=None,
+                params={"mode": "read", "summarize": True},
+                confidence=0.95, is_complex=False, raw_input=raw,
+            )
+
+        # --- P3 v6.0.1 — anti-faux-positif : question d'opinion → conversation ---
+        # "Tu penses que…?", "que penses-tu de…?" tombaient en action (web/read).
+        _opinion_verbs = ("penses", "penser", "crois", "croire", "estimes", "estimer",
+                          "imagines", "imaginer", "trouves", "trouver", "pense", "crois-tu",
+                          "penses-tu", "trouves-tu", "qu'en penses")
+        _is_question = raw.rstrip().endswith("?") or normalized.startswith(("que ", "qu'", "est-ce", "penses-tu", "crois-tu"))
+        _has_2nd_person = any(w in f" {normalized} " for w in (" tu ", " te ", " toi ", "-tu", " ton ", " ta "))
+        if _is_question and _has_2nd_person and any(v in normalized for v in _opinion_verbs):
+            return IntentResult(
+                category="conversation", verb="chat", target=None,
+                confidence=0.9, is_complex=False, raw_input=raw,
+            )
+
+        # --- P1 v6.0.1 — paramètres/réglages d'une app → clic (heuristiques Electron) ---
+        # "va dans les paramètres de Discord" tombait en system/configure.
+        _settings_markers = ("parametre", "paramètre", "reglage", "réglage", "settings", "configuration")
+        if any(m in normalized for m in _settings_markers):
+            app_found = None
+            for app in _KNOWN_APP_NAMES:
+                if app in normalized:
+                    app_found = app
+                    break
+            if app_found is None:
+                fg = (context or {}).get("foreground_window", {}) or {}
+                fg_title = (fg.get("title", "") or "").lower()
+                for app in _KNOWN_APP_NAMES:
+                    if app in fg_title:
+                        app_found = app
+                        break
+            if app_found:
+                return IntentResult(
+                    category="interaction", verb="click", target="paramètres",
+                    params={"element_name": "paramètres", "app_title": app_found},
+                    confidence=0.93, is_complex=False, raw_input=raw,
+                )
+
         # --- Natural one-shot fast-path: wikipedia -> bloc-notes ---
         wiki_markers = ["wikipedia", "wikipédia", "wiki"]
         note_markers = ["bloc notes", "bloc-notes", "blocnotes", "notepad"]

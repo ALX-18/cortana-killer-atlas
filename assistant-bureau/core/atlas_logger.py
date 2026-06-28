@@ -53,3 +53,25 @@ async def log_action(
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+async def log_orchestration_step(
+    orchestration_id: str,
+    step_id: str,
+    status: str,
+    latency_ms: int,
+    error: str | None = None,
+):
+    """Log JSONL dédié orchestration (F3 v6.0)."""
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "pipeline_stage": "orchestration",
+        "orchestration_id": orchestration_id,
+        "step_id": step_id,
+        "status": status,
+        "latency_ms": latency_ms,
+        "error": error,
+    }
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")

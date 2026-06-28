@@ -16,6 +16,13 @@ IMPORTANT : cette réponse sera lue à voix haute.
 Réponds en 1-2 phrases maximum, langage naturel parlé, zéro markdown.
 """
 
+# v6.0 Identity Card + P2 garde linguistique — délégués au package cross-platform
+# core_conversational (v6.0.1). SYSTEM_PROMPT_IDENTITY = identité Atlas de base.
+from core_conversational.identity import ATLAS_BASE_IDENTITY as SYSTEM_PROMPT_IDENTITY
+from core_conversational.llm_client import (
+    contains_non_latin_script, LANG_FALLBACK_MESSAGE,
+)
+
 # --------------------------------------------------------------------------- #
 #  Chargement config
 # --------------------------------------------------------------------------- #
@@ -39,7 +46,8 @@ KEEP_ALIVE: str = _cfg.get("keep_alive", "10m")  # v5.3 — keep model warm in V
 # --------------------------------------------------------------------------- #
 
 SYSTEM_PROMPT_TEMPLATE = """\
-Tu es Atlas, un assistant bureau Windows intelligent. Tu aides l'utilisateur à contrôler son PC.
+{identity_section}
+Tu aides l'utilisateur à contrôler son PC.
 
 RÔLE : Tu ne choisis PAS les outils. C'est le système qui décide automatiquement quel outil utiliser.
 
@@ -93,6 +101,7 @@ def build_system_prompt(context: dict, memories: list[str] | None = None) -> str
         memories_section = "- Aucun souvenir disponible pour le moment."
 
     return SYSTEM_PROMPT_TEMPLATE.format(
+        identity_section=SYSTEM_PROMPT_IDENTITY,
         world_state_summary=world_state_summary,
         memories_section=memories_section,
     )
@@ -173,17 +182,15 @@ async def chat_stream_with_timeout(
     # The timeout is handled at the consumer level (routes.py).
 
 
-async def chat_full(
+async def _chat_full_raw(
     user_message: str,
     context: dict,
     history: Optional[list[dict]] = None,
     memories: Optional[list[str]] = None,
     system_prompt: Optional[str] = None,
 ) -> str:
-    """Version non-streaming : retourne la réponse complète.
-    Si system_prompt est fourni, il remplace le prompt par défaut."""
+    """Génération non-streaming brute (sans garde linguistique)."""
     if system_prompt:
-        # Custom system prompt (used by Planner)
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history)
@@ -215,11 +222,40 @@ async def chat_full(
                         break
         return "".join(parts)
 
-    # Default: use chat_stream
     parts = []
     async for token in chat_stream(user_message, context, history, memories=memories):
         parts.append(token)
     return "".join(parts)
+
+
+async def chat_full(
+    user_message: str,
+    context: dict,
+    history: Optional[list[dict]] = None,
+    memories: Optional[list[str]] = None,
+    system_prompt: Optional[str] = None,
+) -> str:
+    """
+    Version non-streaming avec garde linguistique (P2 v6.0.1).
+    Si la réponse contient des caractères non-latins (dérive Qwen 7B), retry une fois
+    avec instruction FR stricte, puis fallback message générique.
+    """
+    result = await _chat_full_raw(user_message, context, history, memories, system_prompt)
+    if not contains_non_latin_script(result):
+        return result
+
+    logger.warning("[LANG] Dérive linguistique détectée — retry FR strict.")
+    retry_msg = (
+        f"{user_message}\n\n"
+        "IMPORTANT : réponds UNIQUEMENT en français, sans aucun caractère chinois, "
+        "japonais, coréen, cyrillique ou arabe."
+    )
+    result2 = await _chat_full_raw(retry_msg, context, history, memories, system_prompt)
+    if not contains_non_latin_script(result2):
+        return result2
+
+    logger.warning("[LANG] Dérive persistante après retry — fallback générique.")
+    return LANG_FALLBACK_MESSAGE
 
 
 def _strip_markdown_for_voice(text: str) -> str:
