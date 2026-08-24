@@ -42,6 +42,7 @@ class VoiceEngine:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._wake_threshold = float(self._config.get("wake_word_threshold", 0.5))
         self._wake_word_model = str(self._config.get("wake_word_model", "hey_mycroft"))
+        self._wake_score_key = self._wake_word_model
         self._wake_sample_rate = 16000
         self._wake_frame_length = 1280
         self._last_wake_ts = 0.0
@@ -89,6 +90,27 @@ class VoiceEngine:
             self._systray.set_state("idle")
         logger.info("VoiceEngine stopped.")
 
+    def _resolve_wake_word_model(self) -> tuple[str, bool]:
+        """
+        Resolve the configured wake_word_model into a reference usable by openwakeword.
+
+        Returns (model_ref, is_custom_path):
+        - is_custom_path=True: model_ref is an absolute filesystem path to a local
+          .onnx/.tflite file (e.g. the custom "Hey Atlas" model), resolved relative
+          to the project root when given as a relative path.
+        - is_custom_path=False: model_ref is a bare openwakeword built-in keyword
+          (e.g. "hey_mycroft"), downloadable on demand via openwakeword.utils.
+        """
+        value = self._wake_word_model
+        looks_like_path = ("/" in value) or ("\\" in value) or value.endswith((".onnx", ".tflite"))
+        if not looks_like_path:
+            return value, False
+
+        path = pathlib.Path(value)
+        if not path.is_absolute():
+            path = pathlib.Path(__file__).resolve().parent.parent / path
+        return str(path), True
+
     async def _init_wake_word(self):
         """Initialize OpenWakeWord and audio input stream for wake detection."""
         try:
@@ -104,35 +126,50 @@ class VoiceEngine:
         except Exception as e:
             raise RuntimeError(f"Voice dependencies missing (openwakeword/sounddevice): {e}")
 
-        # openwakeword is fully local and keyless.
-        model_loaded = False
-        model_error = None
-        for attempt in range(2):
-            try:
-                try:
-                    self._wake_model = Model(wakeword_models=[self._wake_word_model], inference_framework="onnx")
-                except TypeError:
-                    self._wake_model = Model(wakeword_models=[self._wake_word_model])
-                model_loaded = True
-                break
-            except Exception as e:
-                model_error = e
-                err_msg = str(e)
-                # First retry only: try to auto-download model assets when files are missing.
-                if attempt == 0 and oww_utils is not None and ("NO_SUCHFILE" in err_msg or "File doesn't exist" in err_msg):
-                    try:
-                        logger.info("OpenWakeWord model missing, downloading assets for '%s'...", self._wake_word_model)
-                        m = re.match(r"^(?P<base>.+)_v\d+(?:\.\d+)?$", self._wake_word_model)
-                        model_name = self._wake_word_model if m else f"{self._wake_word_model}_v0.1"
-                        oww_utils.download_models(model_names=[model_name])
-                        logger.info("OpenWakeWord model assets downloaded for '%s'.", self._wake_word_model)
-                        continue
-                    except Exception as download_error:
-                        model_error = download_error
-                break
+        model_ref, is_custom_path = self._resolve_wake_word_model()
 
-        if not model_loaded:
-            raise RuntimeError(f"OpenWakeWord initialization failed: {model_error}")
+        if is_custom_path:
+            if not pathlib.Path(model_ref).exists():
+                raise RuntimeError(
+                    f"Modele wake word custom introuvable: {model_ref}. "
+                    "Lancer 'python scripts/download_voice_models.py' pour le telecharger avant le premier demarrage."
+                )
+            try:
+                self._wake_model = Model(wakeword_models=[model_ref], inference_framework="onnx")
+            except TypeError:
+                self._wake_model = Model(wakeword_models=[model_ref])
+            self._wake_score_key = pathlib.Path(model_ref).stem
+        else:
+            # openwakeword built-in keywords are fully local and keyless.
+            model_loaded = False
+            model_error = None
+            for attempt in range(2):
+                try:
+                    try:
+                        self._wake_model = Model(wakeword_models=[model_ref], inference_framework="onnx")
+                    except TypeError:
+                        self._wake_model = Model(wakeword_models=[model_ref])
+                    model_loaded = True
+                    break
+                except Exception as e:
+                    model_error = e
+                    err_msg = str(e)
+                    # First retry only: try to auto-download model assets when files are missing.
+                    if attempt == 0 and oww_utils is not None and ("NO_SUCHFILE" in err_msg or "File doesn't exist" in err_msg):
+                        try:
+                            logger.info("OpenWakeWord model missing, downloading assets for '%s'...", model_ref)
+                            m = re.match(r"^(?P<base>.+)_v\d+(?:\.\d+)?$", model_ref)
+                            model_name = model_ref if m else f"{model_ref}_v0.1"
+                            oww_utils.download_models(model_names=[model_name])
+                            logger.info("OpenWakeWord model assets downloaded for '%s'.", model_ref)
+                            continue
+                        except Exception as download_error:
+                            model_error = download_error
+                    break
+
+            if not model_loaded:
+                raise RuntimeError(f"OpenWakeWord initialization failed: {model_error}")
+            self._wake_score_key = model_ref
 
         self._wake_sample_rate = int(getattr(self._wake_model, "sample_rate", 16000))
         self._wake_frame_length = int(getattr(self._wake_model, "audio_window_size", 1280))
@@ -164,8 +201,8 @@ class VoiceEngine:
 
         scores = self._wake_model.predict(audio_f32)
         if isinstance(scores, dict):
-            if self._wake_word_model in scores:
-                score = float(scores[self._wake_word_model])
+            if self._wake_score_key in scores:
+                score = float(scores[self._wake_score_key])
             else:
                 score = float(max(scores.values())) if scores else 0.0
         elif isinstance(scores, (list, tuple, np.ndarray)):
@@ -307,7 +344,7 @@ class VoiceEngine:
         try:
             from piper.voice import PiperVoice
 
-            model_name = self._config.get("tts_voice", "fr_FR-upmc-medium")
+            model_name = self._config.get("tts_voice", "fr_FR-siwis-medium")
             model_path = pathlib.Path(__file__).resolve().parent.parent / "data" / "voices" / f"{model_name}.onnx"
             if not model_path.exists():
                 logger.warning("Piper model not found: %s", model_path)
@@ -329,7 +366,7 @@ class VoiceEngine:
         try:
             import subprocess
 
-            model_name = self._config.get("tts_voice", "fr_FR-upmc-medium")
+            model_name = self._config.get("tts_voice", "fr_FR-siwis-medium")
             model_path = pathlib.Path(__file__).resolve().parent.parent / "data" / "voices" / f"{model_name}.onnx"
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as out_wav:
                 out_path = out_wav.name

@@ -124,15 +124,17 @@
         "_note": "Désactivé par défaut depuis Réunion Atlas #4. OCR Tesseract suffit pour 95%+ des cas. Réactiver si Tesseract ne trouve pas l'élément."
     },
     "voice": {
-        "enabled": false,
-        "wake_word_model": "hey_mycroft",
+        "enabled": true,
+        "wake_word_model": "models/wakewords/hey_atlas.onnx",
         "wake_word_threshold": 0.5,
         "stt_model": "base",
         "stt_language": "fr",
         "stt_device": "cuda",
-        "tts_voice": "fr_FR-upmc-medium",
+        "tts_voice": "fr_FR-siwis-medium",
         "max_recording_seconds": 10,
         "silence_threshold_seconds": 1.5,
-        "_note_porcupine": "Migration vers Porcupine possible en remplaçant _init_wake_word() — clé PORCUPINE_ACCESS_KEY requise"
+        "_note_porcupine": "Migration vers Porcupine possible en remplaçant _init_wake_word() — clé PORCUPINE_ACCESS_KEY requise",
+        "_note_wake_word": "Sprint v6.0.2 — modèle 'Hey Atlas' custom (briankelley/atlas-voice-training, release hey_atlas-v1) au lieu du mot-clé intégré 'hey_mycroft'. Confirmé par Alexis le 2026-07-24 (alternative 'V2' du brief écartée, jugée insuffisamment entraînée). Métriques publiées par l'auteur: 81% accuracy / 62% recall / ~1.24 FA/h — à re-mesurer en usage réel quand les tests micro reprendront (reportés, non urgent). Placer le fichier via scripts/download_voice_models.py avant premier lancement.",
+        "_note_tts": "fr_FR-siwis-medium (rhasspy/piper-voices) remplace fr_FR-upmc-medium — absent en v5.0 (cf RAPPORT_V50), à télécharger via scripts/download_voice_models.py."
     }
 }

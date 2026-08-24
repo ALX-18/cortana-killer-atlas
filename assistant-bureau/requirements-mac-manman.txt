@@ -1,0 +1,36 @@
+# === Requirements Manman (Mac M, sans contrôle PC) ===
+# Cross-platform uniquement, pas de libs Windows.
+
+# Backend
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Système (cross-platform)
+psutil==6.1.1
+pyperclip>=1.8.2
+
+# Mémoire / RAG
+chromadb==1.5.1
+sentence-transformers==3.3.1
+aiosqlite>=0.19.0
+
+# Web
+beautifulsoup4>=4.12.0
+ddgs>=6.0.0
+lxml>=5.2.0
+websockets>=12.0
+
+# Scheduling
+apscheduler>=3.10.0
+pyyaml>=6.0.1
+
+# Voix (cross-platform)
+openwakeword>=0.6.0
+faster-whisper>=1.0.0
+piper-tts>=1.2.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+onnxruntime>=1.16.0
