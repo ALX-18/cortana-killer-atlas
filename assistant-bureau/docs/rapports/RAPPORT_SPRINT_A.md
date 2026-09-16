@@ -5,6 +5,8 @@ Agent: Claude Opus 5 (CHAT6, Claude Code Windows)
 > Brief : `docs/briefs/BRIEF_SPRINT_A.md`. Règles : `rapport.md/RAPPORT_RULES.md`.
 > Poste : Toulouse, Intel i5-10400F, 23,9 Go RAM, NVIDIA RTX 5060 8 151 Mio (pilote 616.92), Windows 11 Pro 10.0.26200.
 > Dépôt : `main` @ `875d07b`. **Aucun fichier existant n'a été modifié** (voir section 3).
+>
+> **Mise à jour 19h30 (même jour)** : Alexis a activé la virtualisation dans le BIOS (redémarrage à 18:59). Les parties dépendantes de Docker ont été rejouées : **passage 4** (section 5), Atlas en environnement complet (section 6, C05 à C07), mesures RAM/VRAM avec Docker (annexe C.2). Au redémarrage, Ollama s'est **mis à jour tout seul en 0.34.1** ; les mesures du passage 4 ne sont donc pas strictement comparables à celles de l'après-midi (0.34.0).
 
 ---
 
@@ -14,9 +16,11 @@ Agent: Claude Opus 5 (CHAT6, Claude Code Windows)
 
 **Réponse à la question qui débloque la suite : la suite de tests est ROUGE.**
 - `python -m pytest tests/ -q` (commande brute) : **0 test exécuté**, la collecte est interrompue par 2 erreurs.
-- Avec `--continue-on-collection-errors` et ChromaDB actif : **318 passés / 2 échoués / 2 erreurs de collecte** sur 322 éléments.
-- Suites custom : `test_architecture_v23` **23/23**, `test_interaction_v22` **10/10**, `validate_v12` **ALL PASS**.
-- Les 2 échecs sont `test_web_v20::test_01_searxng_heartbeat_under_3s` (SearXNG indisponible car Docker est bloqué, voir ci-dessous) et `test_v53_migration::TestVisionDisabled::test_vision_disabled_returns_skipped`. Ce dernier est un vrai défaut de test : il dépend de l'ordre d'exécution, passe seul (1/1) et échoue systématiquement dans la suite complète.
+- Environnement complet (passage 4 : Docker ChromaDB + SearXNG, Ollama natif), avec `--continue-on-collection-errors` : **319 passés / 1 échoué / 2 erreurs de collecte** sur 322 éléments. Code de retour de la commande brute : 2.
+- Suites custom (passé deux fois) : `test_architecture_v23` **23/23**, `test_interaction_v22` **10/10**, `validate_v12` **ALL PASS**.
+- **Dans l'environnement complet, plus aucun échec ne vient de l'environnement.** Les trois éléments rouges sont des défauts de la suite elle-même :
+  - `test_api_clean.py` et `test_stream_fix.py` : des scripts collectés comme des tests ;
+  - `test_v53_migration::TestVisionDisabled::test_vision_disabled_returns_skipped` : dépend de l'ordre d'exécution (passe seul, échoue systématiquement dans la suite complète).
 
 **Le vert des tests unitaires masque un produit rouge.** La chaîne vocale est cassée à **trois endroits indépendants**, chacun prouvé sur ce poste (section 6, annexe A) :
 1. Le mot d'éveil ne peut **jamais** se déclencher : `_wake_callback` transmet du float32 normalisé alors qu'openWakeWord attend du PCM int16. Avec « Hey Atlas » injecté, score 0,0008 et 0 déclenchement ; contrôle int16, score 0,9951 et 1 déclenchement.
@@ -25,7 +29,11 @@ Agent: Claude Opus 5 (CHAT6, Claude Code Windows)
 
 S'y ajoutent : une heure **inventée** par le LLM (à 17:06, « Il est 14h32 ») et une commande planifiée qui a **tapé** le mot « Fichier » au clavier au lieu de cliquer.
 
-**État runtime :** Atlas démarre (API prête en ~19 s ; `/health` ok, `/api/health` « degraded » car SearXNG est absent). ChromaDB tourne **en natif** (contournement) : Docker Desktop ne démarre pas, la virtualisation étant désactivée dans le BIOS. Pic VRAM mesuré sur la chaîne complète : **6,5 à 6,7 Go / 8,15 Go**. Pic RAM système : **18,7 / 23,9 Go**. GPU au maximum à **75 °C** après 5 min de charge.
+**État runtime (après activation de la virtualisation) :** Atlas démarre en 17 s ; `/api/health` → **`"status":"ok"`** (Ollama, ChromaDB Docker, SearXNG Docker, voix). Pic VRAM de la chaîne complète : **6,5 à 6,7 Go / 8,15 Go**. Pic RAM système : **23,4 / 23,9 Go (98 %)** avec Docker, dont la VM WSL occupe à elle seule 8,3 Go ; 18,7 Go sans Docker. GPU au maximum à **75 °C** après 5 min de charge.
+
+**Deux constats critiques apparus avec Docker :**
+- **ChromaDB n'écrit pas dans le volume monté.** L'image persiste dans `/data`, alors que `docker-compose.yml` monte `data/chromadb` sur `/chroma/chroma`, qui reste vide. Toute la mémoire long terme d'Atlas (6 collections, depuis février) ne vit que dans la couche du conteneur : un `docker compose down` ou une mise à jour de l'image la **détruirait**. Une sauvegarde a été faite (`docker cp`), rien n'a été modifié.
+- **Le grounding a visé la mauvaise application.** Pour « ouvre le bloc-notes puis clique sur Fichier », il a cherché « bloc-notes » dans la fenêtre Discord au premier plan (une conversation privée) pendant 29 s, au-delà du plafond de 20 s. Aucun clic n'a eu lieu.
 
 ---
 
@@ -35,13 +43,13 @@ S'y ajoutent : une heure **inventée** par le LLM (à 17:06, « Il est 14h32 »)
 |---|---|---|
 | A1 — Confirmer l'état du dépôt côté Windows | `main` = `origin/main` @ `875d07b`, arbre propre, pas d'autre branche, 5 livrables v6.0.2 présents. **Deux divergences** : (1) `2a2389e` n'est **pas un doublon** de `e01949a` : il supprime `core_conversational/test_kokoro_rori.wav` (141 Ko), que `e01949a` avait ajouté, et le blob reste dans l'historique ; (2) le poste **n'est pas vierge** : `.venv` créé le 11/03/2026, modèles Ollama vieux de 3 à 6 mois, `data/` rempli depuis avril. C'est très probablement l'ancien disque avec la nouvelle carte graphique. | PASS (avec divergences signalées) |
 | A2 — Installation depuis zéro + `docs/install_checklist.md` | Installation neuve de `requirements.txt` dans un venv vierge (`Cortana_Killer\venv\`) : **OK en 9 min 32 s**, `pip check` propre. Premier essai en **échec** (`LongPathsEnabled=0`, chemin trop long pour torch). Checklist livrée, 14 étapes, avec les pièges rencontrés. Limite : Python, Ollama, Tesseract et Docker étaient **déjà installés** ; leurs installeurs n'ont pas été rejoués. | PARTIEL |
-| A2 — Atlas installé et démarrant | `python main.py` démarre : lock, Tesseract 5.5.0, ChromaDB connecté, scheduler, triggers, systray, VoiceEngine, bridge 9999. `/health` → `ok`. | PASS |
+| A2 — Atlas installé et démarrant | `python main.py` démarre : lock, Tesseract 5.5.0, ChromaDB connecté, scheduler, triggers, systray, VoiceEngine, bridge 9999. Après activation de la virtualisation, voie Docker documentée validée : `/api/health` → `"status":"ok"`, tous services verts. | PASS |
 | A3 — `scripts/doctor.py` | Livré : 76 vérifications, correction proposée pour chaque échec, détection GPU/VRAM, recommandation de modèle, code de retour 1 si un composant critique manque, mode `--json`. Validé sur 2 venvs × 2 PATH, résultats cohérents avec les mesures. | PASS |
-| A4 — Suite complète 270 pytest + 33 custom + validate_v12 | Exécutée 3 fois (env. trouvé / + Chroma natif / venv neuf) + 3 scripts custom. La suite compte aujourd'hui **320 tests pytest** collectés, et non 270. Échecs listés nominativement (section 5). **Rouge.** | PASS (tâche) / suite ROUGE |
+| A4 — Suite complète 270 pytest + 33 custom + validate_v12 | Exécutée **4 fois** (env. trouvé / + Chroma natif / venv neuf / **environnement complet Docker**) + 3 scripts custom (deux fois). La suite compte aujourd'hui **320 tests pytest** collectés, et non 270. Échecs listés nominativement (section 5). **Rouge.** | PASS (tâche) / suite ROUGE |
 | A4 — Cas connu `test_voice_v40::test_10_gpu_absent_warning_no_crash` | **PASS sur Windows**, confirmé dans les 3 passages. Bémol : le test simule `torch.cuda` et ne voit pas qu'en réalité torch est une build CPU, d'où un avertissement « aucun GPU » **faux** à chaque démarrage. | PASS |
 | A5 — Audit qualité des tests | Livré (annexe A) : couverture par module et par fonction (52 % au total, **grounding 25 %**), tests tautologiques, zones critiques non couvertes, tests fragiles, liste hiérarchisée. Aucun test écrit. | PASS |
 | A6 — Inventaire code et architecture | Livré (annexe B) : 6 points du superviseur confirmés ou corrigés, 40 éléments localisés avec criticité, preuve de code mort pour MiniCPM-V, écarts doc/code, dépendances. | PASS |
-| A7 — RAM / VRAM / températures | Mesures chiffrées pour les 4 premiers points (annexe C). Températures **GPU** mesurées. Température **CPU non mesurée** (WMI refusé sans droits admin ; la zone ACPI lisible est figée à 27,9 °C). Pic VRAM 6,5–6,7 Go : arbitrages proposés, **non appliqués**. | PARTIEL |
+| A7 — RAM / VRAM / températures | Mesures chiffrées pour les 4 premiers points, sans puis avec Docker (annexe C.1, C.2 ; pic RAM à **98 %** avec Docker). Températures **GPU** mesurées. Température **CPU non mesurée** (WMI refusé sans droits admin ; la zone ACPI lisible est figée à 27,9 °C). Pic VRAM 6,5–6,7 Go : arbitrages proposés, **non appliqués**. | PARTIEL |
 | A8 — R01 à R07 avec micro réel | R01 **PASS** (réel). R02 à R07 **non exécutés avec une voix humaine**. Le micro réel a été ouvert (40 min d'écoute par Atlas, 20 min de mesure de faux positifs), et R02, R03, R04 et R05 ont été évalués par injection audio ou pipeline texte : **tous FAIL prédits et prouvés** (section 6). | PARTIEL |
 | A8 — Taux de faux positifs `hey_atlas` | Code actuel : 0 sur 40 min, **par construction** (le détecteur ne peut rien détecter). Détecteur correctement alimenté en int16 : **0 déclenchement sur 20 min** de micro réel (score max 0,0172). L'activité réelle de la pièce pendant ces 20 min n'est pas connue. | PARTIEL |
 | A9 — Revue des rapports de veille | **Rapports introuvables** : disque, Gmail, Notion (seule mention : « une veille automatisée tourne chaque samedi »), tâches planifiées locales, routines cloud Claude Code (liste vide). Substitut fourni : relevé des versions obsolètes (annexe D), rien appliqué. | FAIL (substitut fourni) |
@@ -81,7 +89,7 @@ Fichiers de **données runtime** modifiés comme effet de bord des tests et mesu
 - `data/habits.db` : écrite puis nettoyée par `test_habit_persistence` et `validate_v12` ;
 - `data/schedules.json` et `data/triggers.json` : **identiques** avant et après (vérifié par `diff` avec la sauvegarde de début de sprint).
 
-Environnement modifié : le venv neuf a reçu `pytest`, `pytest-asyncio` et `pytest-cov`. Le `.venv` historique n'a **reçu aucune installation**. Les modèles de support OpenWakeWord ont été téléchargés dans le venv neuf. Le fichier `.coverage` généré a été supprimé.
+Environnement modifié : conteneur Docker `assistant_ollama` **arrêté** (`docker stop`, réversible par `docker start assistant_ollama`) ; `atlas_searxng` et `assistant_chromadb` laissés actifs. Le venv neuf a reçu `pytest`, `pytest-asyncio` et `pytest-cov`. Le `.venv` historique n'a **reçu aucune installation**. Les modèles de support OpenWakeWord ont été téléchargés dans le venv neuf. Le fichier `.coverage` généré a été supprimé.
 
 ---
 
@@ -183,51 +191,75 @@ ERROR tests/test_stream_fix.py - requests.exceptions.ConnectionError: HTTPCon...
 TOTAL                                    6538   3124    52%
 ```
 
+### Passage 4 — environnement complet (après activation de la virtualisation, 19:15)
+Docker Desktop 29.8.0 : `assistant_chromadb` (API v2, 1.0.0) et `atlas_searxng` actifs ; conteneur `assistant_ollama` **arrêté** (conflit, voir L22) ; Ollama natif **0.34.1** ; `.venv` historique ; Atlas arrêté.
+```
+python -m pytest tests/ -q -p no:cacheprovider
+```
+```
+ERROR tests/test_api_clean.py - requests.exceptions.ConnectionError: HTTPConn...
+ERROR tests/test_stream_fix.py - requests.exceptions.ConnectionError: HTTPCon...
+!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!
+2 errors in 17.73s
+exit=2
+```
+```
+python -m pytest tests/ -q -rfEs --continue-on-collection-errors --durations=20 --junitxml=run4.xml -p no:cacheprovider
+```
+```
+FAILED tests/test_v53_migration.py::TestVisionDisabled::test_vision_disabled_returns_skipped
+ERROR tests/test_api_clean.py - requests.exceptions.ConnectionError: HTTPConn...
+ERROR tests/test_stream_fix.py - requests.exceptions.ConnectionError: HTTPCon...
+1 failed, 319 passed, 4 warnings, 2 errors in 101.71s (0:01:41)
+exit=1
+```
+`test_web_v20::test_01_searxng_heartbeat_under_3s` **passe** (SearXNG actif) et `test_chroma_integration` passe **5/5** contre le vrai ChromaDB Docker. Les 6 collections Atlas sont intactes après la suite (vérifié ; sauvegarde `docker cp` faite avant).
+
 ### Échecs et erreurs, nominativement
 
 | Test | Passages | Cause exacte | Nature |
 |---|---|---|---|
-| `test_api_clean.py` (collecte) | 0, 1, 2, 3 | Script, pas un test : `requests.post("http://localhost:8550/api/chat")` à l'import → `ConnectionError` (WinError 10061) | **Défaut de la suite** |
-| `test_stream_fix.py` (collecte) | 0, 1, 2, 3 | Idem, sur `/api/chat/stream` | **Défaut de la suite** |
-| `test_v53_migration.py::TestVisionDisabled::test_vision_disabled_returns_skipped` | 1, 2, 3 | `asyncio.get_event_loop()` → `RuntimeError: There is no current event loop in thread 'MainThread'` (pytest-asyncio 1.3 a déjà positionné puis retiré une boucle). **Passe seul** (`1 passed`) et dans son fichier (`17 passed`). | **Test dépendant de l'ordre** : vrai défaut |
-| `test_web_v20.py::test_01_searxng_heartbeat_under_3s` | 1, 2, 3 | `httpx.ConnectError: All connection attempts failed` sur `localhost:8888` : SearXNG non démarré, Docker bloqué (virtualisation BIOS désactivée, `HCS_E_HYPERV_NOT_INSTALLED`) | Environnement, cause identifiée |
+| `test_api_clean.py` (collecte) | 0 à 4 | Script, pas un test : `requests.post("http://localhost:8550/api/chat")` à l'import → `ConnectionError` (WinError 10061) | **Défaut de la suite** |
+| `test_stream_fix.py` (collecte) | 0 à 4 | Idem, sur `/api/chat/stream` | **Défaut de la suite** |
+| `test_v53_migration.py::TestVisionDisabled::test_vision_disabled_returns_skipped` | 1 à 4 | `asyncio.get_event_loop()` → `RuntimeError: There is no current event loop in thread 'MainThread'` (pytest-asyncio 1.3 a déjà positionné puis retiré une boucle). **Passe seul** (`1 passed`) et dans son fichier (`17 passed`). | **Test dépendant de l'ordre** : vrai défaut |
+| `test_web_v20.py::test_01_searxng_heartbeat_under_3s` | 1, 2, 3 (**PASS au 4**) | `httpx.ConnectError: All connection attempts failed` sur `localhost:8888` : SearXNG non démarré, Docker bloqué (virtualisation BIOS désactivée, `HCS_E_HYPERV_NOT_INSTALLED`) | Environnement, résolu par l'activation de la virtualisation |
 | `test_chroma_integration.py` test_01 (erreur), test_02 (échec), test_03, test_04, test_05 (erreurs) | 1 | `ValueError: Could not connect to a Chroma server` / `httpx.ConnectError` sur `localhost:8001` | Environnement ; **5/5 PASS** en passages 2 et 3 |
 | `test_memory_v60.py` (8 tests) | 1 (ignorés) | « ChromaDB (Docker) non disponible » | Environnement ; **33/33 PASS** en passages 2 et 3 |
 | `test_web_v20.py::test_06_browser_open_and_get_current_url` | 3 | `BrowserType.launch: Executable doesn't exist at ...\ms-playwright\chromium-1243\chrome-win64\chrome.exe` : playwright 1.63 (venv neuf) attend Chromium 1243, seul le 1208 est installé | Étape d'installation manquante (checklist §4) |
 
 ### Non-régression par suite (résultats JUnit)
 
-| Fichier | Passage 1 (env. trouvé) | Passage 2 (+Chroma natif) | Passage 3 (venv neuf) |
-|---|---|---|---|
-| `test_app_resolver_v51` | 5/5 | 5/5 | 5/5 |
-| `test_automation_v30` | 15/15 | 15/15 | 15/15 |
-| `test_chroma_integration` | 0/5 (1 échec, 4 erreurs) | 5/5 | 5/5 |
-| `test_core_conversational` | 15/15 | 15/15 | 15/15 |
-| `test_file_indexer_v51` | 2/2 | 2/2 | 2/2 |
-| `test_file_organizer_v51` | 3/3 | 3/3 | 3/3 |
-| `test_final_v50` | 10/10 | 10/10 | 10/10 |
-| `test_identity_v60` | 8/8 | 8/8 | 8/8 |
-| `test_interaction_v22` | 10/10 | 10/10 | 10/10 |
-| `test_memory_v60` | 25/33 (8 ignorés) | 33/33 | 33/33 |
-| `test_metrics_grounding_v52` | 7/7 | 7/7 | 7/7 |
-| `test_orchestrator_v60` | 14/14 | 14/14 | 14/14 |
-| `test_real_e2e_kimi_v51` | 2/2 | 2/2 | 2/2 |
-| `test_redo_heuristics_v52` | 22/22 | 22/22 | 22/22 |
-| `test_sprint_kimi_understanding_v51` | 14/14 | 14/14 | 14/14 |
-| `test_stabilisation_v31` | 5/5 | 5/5 | 5/5 |
-| `test_v53_migration` | 16/17 (1 échec) | 16/17 (1 échec) | 16/17 (1 échec) |
-| `test_v601_patches` | 25/25 | 25/25 | 25/25 |
-| `test_vision_parsers` | 45/45 | 45/45 | 45/45 |
-| `test_vision_v60` | 24/24 | 24/24 | 24/24 |
-| `test_voice_v40` | 12/12 (**test_10 PASS**) | 12/12 | 12/12 |
-| `test_voice_v602` | 17/17 | 17/17 | 17/17 |
-| `test_web_v20` | 9/10 (1 échec) | 9/10 (1 échec) | 8/10 (2 échecs) |
-| erreurs de collecte (2 scripts) | 2 | 2 | 2 |
-| **Total** | **305 P / 3 F / 8 S / 6 E** | **318 P / 2 F / 2 E** | **317 P / 3 F / 2 E** |
+| Fichier | Passage 1 (env. trouvé) | Passage 2 (+Chroma natif) | Passage 3 (venv neuf) | Passage 4 (env. complet) |
+|---|---|---|---|---|
+| `test_app_resolver_v51` | 5/5 | 5/5 | 5/5 | 5/5 |
+| `test_automation_v30` | 15/15 | 15/15 | 15/15 | 15/15 |
+| `test_chroma_integration` | 0/5 (1 échec, 4 erreurs) | 5/5 | 5/5 | 5/5 |
+| `test_core_conversational` | 15/15 | 15/15 | 15/15 | 15/15 |
+| `test_file_indexer_v51` | 2/2 | 2/2 | 2/2 | 2/2 |
+| `test_file_organizer_v51` | 3/3 | 3/3 | 3/3 | 3/3 |
+| `test_final_v50` | 10/10 | 10/10 | 10/10 | 10/10 |
+| `test_identity_v60` | 8/8 | 8/8 | 8/8 | 8/8 |
+| `test_interaction_v22` | 10/10 | 10/10 | 10/10 | 10/10 |
+| `test_memory_v60` | 25/33 (8 ignorés) | 33/33 | 33/33 | 33/33 |
+| `test_metrics_grounding_v52` | 7/7 | 7/7 | 7/7 | 7/7 |
+| `test_orchestrator_v60` | 14/14 | 14/14 | 14/14 | 14/14 |
+| `test_real_e2e_kimi_v51` | 2/2 | 2/2 | 2/2 | 2/2 |
+| `test_redo_heuristics_v52` | 22/22 | 22/22 | 22/22 | 22/22 |
+| `test_sprint_kimi_understanding_v51` | 14/14 | 14/14 | 14/14 | 14/14 |
+| `test_stabilisation_v31` | 5/5 | 5/5 | 5/5 | 5/5 |
+| `test_v53_migration` | 16/17 (1 échec) | 16/17 (1 échec) | 16/17 (1 échec) | 16/17 (1 échec) |
+| `test_v601_patches` | 25/25 | 25/25 | 25/25 | 25/25 |
+| `test_vision_parsers` | 45/45 | 45/45 | 45/45 | 45/45 |
+| `test_vision_v60` | 24/24 | 24/24 | 24/24 | 24/24 |
+| `test_voice_v40` | 12/12 (**test_10 PASS**) | 12/12 | 12/12 | 12/12 |
+| `test_voice_v602` | 17/17 | 17/17 | 17/17 | 17/17 |
+| `test_web_v20` | 9/10 (1 échec) | 9/10 (1 échec) | 8/10 (2 échecs) | 10/10 |
+| erreurs de collecte (2 scripts) | 2 | 2 | 2 | 2 |
+| **Total** | **305 P / 3 F / 8 S / 6 E** | **318 P / 2 F / 2 E** | **317 P / 3 F / 2 E** | **319 P / 1 F / 2 E** |
 
 Les modules `test_cleanup.py`, `test_habit_persistence.py`, `test_architecture_v23.py`, `test_real_integration_v23.py` et `test_real_kimi_5cmd_v51.py` sont importés par pytest, mais ne contiennent **aucun** test collecté.
 
-### Suites custom (scripts), `.venv`, Atlas arrêté
+### Suites custom (scripts), `.venv`, Atlas arrêté — identiques à 16h et au passage 4 (19h15)
 ```
 python tests/test_architecture_v23.py   → exit=0 — « RÉSULTAT : 23/23 (100%) »
 python tests/test_interaction_v22.py    → exit=0 — « Résultat : 10/10 tests passés »
@@ -242,7 +274,7 @@ python -m pytest tests/test_v53_migration.py -q -p no:cacheprovider → 17 passe
 ```
 
 ### Verdict
-**Suite ROUGE**, pour deux raisons : (a) la commande standard n'exécute aucun test ; (b) même dans le meilleur environnement obtenu, un échec relève d'un vrai défaut de test (dépendance à l'ordre), l'autre d'un service indisponible. Aucune régression ne peut être attribuée à ce sprint : aucun fichier existant n'a été modifié.
+**Suite ROUGE**, pour deux raisons : (a) la commande standard n'exécute aucun test (code 2) ; (b) dans l'environnement complet, il reste un échec dû à un vrai défaut de test (dépendance à l'ordre). **Aucun échec restant n'est dû à l'environnement.** Aucune régression ne peut être attribuée à ce sprint : aucun fichier existant n'a été modifié.
 
 ---
 
@@ -277,7 +309,11 @@ Ambiance : niveau moyen 403, p95 2 049, max 5 663 ; **17,7 % des trames au-dessu
 | C03 | Premier appel LLM après démarrage | Réponse rapide | 80,5 s (dont 40 s de watchdog de détection GPU Ollama et 40 s de chargement) ; au second essai à froid, 14,6 s | Observation |
 | C04 | `/api/health` Atlas en marche | État fidèle | `"voice": {"enabled": true, "running": true}` alors que la voix ne peut pas se déclencher | FAIL (observabilité) |
 
-Les 3 Bloc-notes ouverts par C02 ont été fermés ; leur seul contenu était le texte tapé par le test.
+| C05 | Même chaîne, **environnement complet** (Docker, Ollama 0.34.1), 19:21 | Idem C02 | STT **correct** (« Ouvre le bloc note puis clique sur fichier. », 15,8 s à froid / 0,19 s à chaud). `launch_app` : **à nouveau 3 lancements** (19:21:53 / 55 / 57), vérification échouée. Puis `ui_click_element` : **« Recherche 'bloc-notes' dans '… - Discord' (type=electron) »**, la cible étant la fenêtre Discord au premier plan (conversation privée). Grounding de 19:22:15,7 à 19:22:44,7, soit **29 s pour un plafond de 20 s** (couches bloquantes, L9) ; abandon, **aucun clic**. Réponse : « 'bloc notes' lancé avec succès. ; Recherche visuelle trop lente — timeout 20s. » Pipeline : 67,2 s. | FAIL |
+| C06 | `/api/health`, environnement complet | Tous services OK | `{"status":"ok", ollama ok, chromadb ok, searxng ok, voice running}` (toujours trompeur pour la voix) | PASS (réserve C04) |
+| C07 | `POST /api/chat` « Comment tu vas ? », premier appel après démarrage | Réponse conversationnelle | 46 s à froid. « Je vais bien, merci ! Comment allez-vous ? Est-ce que vous avez besoin d'aide pour ajuster vos paramètres Discord ou pour autre chose ? » La mémoire long terme réelle est bien branchée, mais un souvenir ancien et hors sujet contamine la réponse. | PARTIEL |
+
+Les Bloc-notes ouverts par C02 et C05 (3 + 3) ont été fermés ; leur seul contenu était le texte tapé par le test (C02) ou vide (C05).
 
 ---
 
@@ -292,8 +328,8 @@ Les 3 Bloc-notes ouverts par C02 ont été fermés ; leur seul contenu était le
 | L5 | **`window_hotkey` décompose une chaîne en caractères** (`*args.get("keys")`) : le planificateur peut faire taper du texte dans la fenêtre au premier plan. | Élevé | Sprint B : valider `keys` (liste de touches connues) dans le validateur. |
 | L6 | **Relance non idempotente de `launch_app`** : 3 lancements, succès annoncé malgré l'échec de vérification. | Moyen | Sprint B : vérification tolérante au titre de fenêtre, pas de relance si le processus existe. |
 | L7 | **Suite rouge** : 2 scripts à effets de bord collectés + 1 test dépendant de l'ordre. | Élevé (bloque C) | Sprint B minimal : exclure ou déplacer les scripts (`collect_ignore`), corriger le test (`asyncio.run`). |
-| L8 | **Docker inutilisable** (virtualisation désactivée dans le BIOS) → SearXNG absent, ChromaDB en natif. | Moyen | Action d'Alexis dans le BIOS (hors de ma portée, réglage système). ChromaDB natif documenté. |
-| L9 | **Couches OCR bloquantes** : `_try_ocr` et `_try_easyocr` sont synchrones, les délais de `wait_for` ne s'appliquent pas (8 s réels pour un délai de 3 s, enregistré « failure » au lieu de « timeout »), et toute la boucle (API, voix) est gelée. | Élevé | Sprint B : `asyncio.to_thread` ; le test actuel (`asyncio.sleep`) ne le détecte pas. |
+| L8 | ~~Docker inutilisable (virtualisation désactivée dans le BIOS)~~ **Résolu à 18:59** par Alexis. Passage 4 et mesures rejoués. | — | Checklist : `VirtualizationFirmwareEnabled` vaut `False` dès que l'hyperviseur tourne ; `doctor.py` vérifie aussi `HypervisorPresent`. |
+| L9 | **Couches OCR bloquantes** : `_try_ocr` et `_try_easyocr` sont synchrones, les délais de `wait_for` ne s'appliquent pas (8 s réels pour un délai de 3 s, enregistré « failure » au lieu de « timeout » ; **29 s réels pour un plafond global de 20 s** en C05), et toute la boucle (API, voix) est gelée. | Élevé | Sprint B : `asyncio.to_thread` ; le test actuel (`asyncio.sleep`) ne le détecte pas. |
 | L10 | **Démarrage à froid LLM jusqu'à 80 s** (watchdog GPU Ollama 0.34.0 + chargement sans mmap), proche de `stream_timeout_seconds=90`. | Moyen | Préchargement au démarrage d'Atlas ; suivre Ollama 0.34.1 (annexe D). |
 | L11 | **torch en build CPU** : EasyOCR 22 s sur CPU, faux avertissement « aucun GPU ». Passer en CUDA ajouterait ~1 Go de VRAM au pic. | Moyen | Arbitrage superviseur (annexe C). |
 | L12 | **`requirements.txt` non figé** : dérive constatée entre venvs (piper 1.4.1 → 1.8.0, torch 2.12.1 → 2.14.0, onnxruntime 1.24.3 → 1.30.0). `easyocr`, `pypdf` et `pytest` ne sont pas déclarés. | Moyen | Sprint B/C : fichier de verrouillage. |
@@ -305,15 +341,21 @@ Les 3 Bloc-notes ouverts par C02 ont été fermés ; leur seul contenu était le
 | L18 | Rapports de veille **introuvables** : A9 non réalisé sur sa source. | Moyen | Superviseur : indiquer l'emplacement des rapports du samedi. |
 | L19 | Installeurs de Python, Ollama, Tesseract et Docker **non rejoués** (déjà présents) : la checklist est vérifiée sur un poste préinstallé, pas sur un Windows vierge. | Moyen | Validation sur une VM ou un second poste (nécessite la virtualisation). |
 | L20 | `data/voices/*.onnx.json` non couvert par `.gitignore` : risque de commit accidentel. | Faible | Sprint C : ajouter `data/voices/` au `.gitignore`. |
+| L21 | **Mémoire long terme non persistée sur l'hôte** : l'image `chromadb/chroma` écrit dans `/data` (`persist_path: "/data"`), le volume est monté sur `/chroma/chroma` (vide), et `data/chromadb` est vide côté Windows. `docker compose down`, une mise à jour d'image ou une suppression du conteneur = **perte de toute la mémoire**. | **Élevé** | Immédiat : ne pas supprimer ni recréer `assistant_chromadb`. Sauvegarde sprint A : `docker cp assistant_chromadb:/data` (7,6 Mo, hors dépôt). Sprint B : monter le volume sur `/data` (ou `persist_path`) après copie. Détecté par `doctor.py`. |
+| L22 | **Deux Ollama sur le port 11434** : `docker-compose.yml` démarre `assistant_ollama` (0.17.0, redémarrage automatique) sur `[::]:11434`, l'Ollama natif écoute sur `127.0.0.1:11434`. `localhost:11434` répondait **0.17.0** (le conteneur, qui n'a que `mistral`). Atlas utilise `127.0.0.1`, donc le natif, mais tout client qui résout `localhost` en IPv6 part vers le conteneur. | Moyen | Conteneur arrêté pour ce sprint (`docker stop assistant_ollama`, réversible). Sprint B/C : retirer le service de `docker-compose.yml` ou le placer derrière un profil. |
+| L23 | **Saturation RAM avec Docker** : VM WSL 8,3 Go ; RAM système **23,4 / 23,9 Go** au pic de la chaîne (18,7 Go sans Docker). Au-delà, le système paginera. | **Élevé** | Arbitrage superviseur : limiter la VM WSL (`.wslconfig` → `memory=`), ChromaDB natif, ou alléger les modèles CPU (annexe C.2). Non appliqué. |
+| L24 | **Grounding sur la mauvaise application** (C05) : le planificateur et le validateur ont laissé cibler la fenêtre au premier plan (Discord) pour un libellé d'une autre application. Un clic dans une conversation privée était possible. | **Élevé** | Sprint B : la cible d'un `ui_click_element` doit être l'application nommée ou celle lancée à l'étape précédente, jamais la fenêtre au premier plan par défaut. |
+| L25 | **Mise à jour automatique d'Ollama** (0.34.0 → 0.34.1 au redémarrage) : environnement non figé entre deux mesures. | Faible | Désactiver la mise à jour automatique pendant les campagnes de mesure. |
+| L26 | Rappel mémoire hors sujet dans les réponses conversationnelles (C07). | Faible | Sprint B : seuil de pertinence (`retrieval_min_score`) à vérifier sur la base réelle. |
 
 ---
 
 ## 8. Checklist de validation
 
 - [x] **État du dépôt confirmé côté Windows** : section 2, A1 (avec 2 divergences : `2a2389e` n'est pas un doublon ; le poste n'est pas vierge).
-- [x] **Atlas installé et démarrant, checklist suivie et livrée** : installation neuve OK (section 2, A2), démarrage réel (`/health` ok, section 6 C04) ; `docs/install_checklist.md` livré. Réserve : installeurs système non rejoués (L19).
+- [x] **Atlas installé et démarrant, checklist suivie et livrée** : installation neuve OK (section 2, A2), démarrage réel en environnement complet (`/api/health` → `ok`, section 6 C06) ; `docs/install_checklist.md` livré. Réserve : installeurs système non rejoués (L19).
 - [x] **`doctor.py` livré, détecte la VRAM, recommande un modèle** : section 4 (RTX 5060, 8 151 Mio → `qwen2.5:7b` + whisper `base`).
-- [x] **Suite complète exécutée, résultats bruts, échecs nominatifs** : section 5 (3 passages + 3 scripts, 5 causes nominatives).
+- [x] **Suite complète exécutée, résultats bruts, échecs nominatifs** : section 5 (4 passages dont un en environnement complet, + 3 scripts ×2, causes nominatives).
 - [x] **Audit de qualité des tests livré** : annexe A.
 - [x] **Inventaire dette et code mort livré, incluant les points relevés en A6** : annexe B.
 - [x] **Relevé RAM/VRAM/températures chiffré** : annexe C. Réserve : température CPU non mesurée (L15).
@@ -328,7 +370,7 @@ Les 3 Bloc-notes ouverts par C02 ont été fermés ; leur seul contenu était le
 ### Ordre des sprints — réponse à la question du brief
 La suite est **rouge**, donc la règle du brief s'applique : corriger le bloquant **avant** de déplacer. Le bloquant qui rend un déplacement invérifiable est cependant **petit et localisé dans `tests/`**. Proposition soumise au superviseur :
 
-1. **B-minimal** (verdir la suite, ~½ journée) : exclure ou renommer `test_api_clean.py`, `test_stream_fix.py`, `test_cleanup.py` et `test_habit_persistence.py` de la collecte ; corriger `TestVisionDisabled` (`asyncio.run`) ; rendre `test_01_searxng_heartbeat` conditionnel (skip si SearXNG est absent, comme `test_memory_v60` pour ChromaDB). Critère : `python -m pytest tests/ -q` vert, commande brute, sans option.
+1. **B-minimal** (verdir la suite, ~½ journée) : exclure ou renommer `test_api_clean.py`, `test_stream_fix.py`, `test_cleanup.py` et `test_habit_persistence.py` de la collecte ; corriger `TestVisionDisabled` (`asyncio.run`) ; rendre `test_01_searxng_heartbeat` et `test_chroma_integration` conditionnels (skip si le service est absent, comme `test_memory_v60`), pour que la suite reste interprétable sans Docker. Critère : `python -m pytest tests/ -q` vert, commande brute, sans option. Au passage 4, seuls ces points séparent la suite du vert. **Avant tout**, corriger la persistance ChromaDB (L21), car la restructuration du sprint C touchera probablement `docker-compose.yml` et `data/`.
 2. **C** (restructuration) sur cette base verte.
 3. **B-complet** (corrections produit ci-dessous).
 
@@ -339,7 +381,9 @@ La suite est **rouge**, donc la règle du brief s'applique : corriger le bloquan
 - P1.4 Heure et date déterministes (L4).
 - P1.5 Validation de `window_hotkey` et des paramètres produits par le planificateur (L5).
 - P1.6 Couches OCR hors boucle d'événements, délais réellement appliqués (L9).
-- P1.7 BIOS : activer la virtualisation (action d'Alexis) pour SearXNG et ChromaDB via Docker (L8).
+- P1.7 **Persistance ChromaDB** (L21) : sauvegarder `/data`, monter le volume sur le bon chemin, vérifier après `docker compose down/up`. *(La virtualisation BIOS est faite, L8 résolu.)*
+- P1.9 Cible du grounding = application demandée, jamais la fenêtre au premier plan par défaut (L24).
+- P1.10 RAM : arbitrage sur la VM WSL (L23).
 - P1.8 Après P1.1 à P1.3 : **refaire R02 à R07 avec Alexis au micro**, en disant « **Hey Atlas** » ; mesurer 30 min de faux positifs en usage réel.
 
 ### P2 — robustesse technique
@@ -351,6 +395,7 @@ La suite est **rouge**, donc la règle du brief s'applique : corriger le bloquan
 - P2.6 `/api/health` : `voice.running` doit refléter la capacité réelle (modèles, cuBLAS, TTS) (C04).
 - P2.7 Préchargement du LLM au démarrage et utilisation effective de `ollama.context_window` (L10, annexe B).
 - P2.8 `start_atlas_desktop.bat` : activer le venv.
+- P2.9 `docker-compose.yml` : retirer ou isoler le service `ollama` (L22) ; secret SearXNG hors dépôt (S1).
 
 ### P3 — performance / qualité
 - P3.1 Arbitrages VRAM (annexe C), à trancher avant tout passage de torch en CUDA.
@@ -437,7 +482,7 @@ Les invariants 2 (le LLM planifie) et 3 (validateur déterministe) reposent sur 
 | `test_vision_v60` (`_try_easyocr("Notepad", ...)`) | Écran réel, fenêtres ouvertes | Idem |
 | `test_interaction_v22::test_03` | Fenêtre active réelle | A lu « Settings - Docker Desktop » |
 | `test_web_v20` (10 tests) | Internet (ddgs, example.com), SearXNG, **navigateur Playwright réel** (11,9 s) | Échec selon l'environnement |
-| `test_chroma_integration` | Serveur ChromaDB | 0/5 sans serveur |
+| `test_chroma_integration` | Serveur ChromaDB ; crée et supprime une collection **dans la vraie base Atlas** (Docker) | 0/5 sans serveur ; risque pour la mémoire réelle, aggravé par L21 |
 | `test_core_conversational::test_embeddings_available` | Modèle HF (26,5 s) | Réseau au premier lancement |
 | `test_automation_v30` | Vrais `data/schedules.json` et `triggers.json` (sauvegarde/restauration par fixture) | Un crash en cours de test laisse l'état modifié |
 | `test_metrics_grounding_v52`, `test_stabilisation_v31`, `test_final_v50`, orchestrateur | Écrivent dans le vrai `data/atlas_actions.jsonl` | +101 lignes pendant ce sprint |
@@ -524,6 +569,9 @@ Les invariants 2 (le LLM planifie) et 3 (validateur déterministe) reposent sur 
 | E4 | validateur | `app_title="le bloc-notes"` (article conservé) | Faible |
 | E5 | réponses conversationnelles | Heure inventée (R03) | **Élevée** |
 | E6 | `core/planner.py` docstring | « Utilise Qwen2.5 14B » alors que la config est en 7B | Faible |
+| D1 | `docker-compose.yml` service `chromadb` | Volume monté sur `/chroma/chroma` alors que l'image persiste dans `/data` : mémoire dans la couche du conteneur (L21) | **Élevée** |
+| D2 | `docker-compose.yml` service `ollama` | Second Ollama (0.17.0) sur `[::]:11434`, `restart: unless-stopped`, démarré à chaque lancement de Docker Desktop (L22) | Moyenne |
+| D3 | `docker-compose.yml` | Images `:latest` non épinglées (`chromadb/chroma`, `searxng/searxng`, `ollama/ollama`) : un `pull` change silencieusement de version | Moyenne |
 | S1 | `docker-compose.yml`, `config/searxng/settings.yml` | Secret SearXNG en dur `atlas_secret_key_change_me` (service local) | Faible |
 | S2 | `docker-compose.yml` | Service `ollama` sur 11434 en conflit avec l'Ollama natif | Moyenne |
 | O1 | `/api/health` | `voice.running=true` sans capacité réelle | Moyenne |
@@ -537,6 +585,7 @@ Les invariants 2 (le LLM planifie) et 3 (validateur déterministe) reposent sur 
 | `README.md` | `docker-compose up -d` | Démarre aussi un Ollama conteneurisé (conflit) ; exige la virtualisation |
 | `README.md` | `pip install -r requirements.txt` suffit | Manquent `easyocr`, `pypdf`, Playwright Chromium, dossier `logs/`, modèles voix, cuBLAS |
 | `README.md` Architecture | `docker-compose.yml # Ollama + ChromaDB` | + SearXNG ; `core/` et `tools/` listés partiellement (voix, grounding, planner, orchestrator absents) |
+| `README.md` | « `docker-compose up -d` » démarre la mémoire | Mémoire non persistée sur l'hôte (L21) |
 | `README.md` | « Tesseract absent → couche vision MiniCPM-V » | Vision désactivée : repli EasyOCR puis échec |
 | `docs/voice_runbook.md` §0 et §2 | Pipeline prêt une fois les modèles téléchargés | 3 défauts bloquants (V1 à V4) |
 | `docs/voice_runbook.md` §5 | « Sur RTX 3050 » | RTX 5060 ; l'avertissement « aucun GPU » est faux |
@@ -572,6 +621,8 @@ Les invariants 2 (le LLM planifie) et 3 (validateur déterministe) reposent sur 
 
 ## Annexe C — Relevé RAM, VRAM et températures
 
+### C.1 — Environnement de l'après-midi (sans Docker, ChromaDB natif)
+
 **Méthode.** Échantillonneur (`nvidia-smi` + `psutil`) de 16:24:17 à 17:05:19. Pas effectif ~3,5 s. Chaque phase est étiquetée pendant la mesure. « RSS python » = somme des processus Python hors échantillonneur (Atlas + processus de mesure). ChromaDB tourne en natif (`chroma.exe`, non compté). Bureau Windows actif pendant toute la mesure : Wallpaper Engine, Opera GX, Discord, VS Code, Overwolf, Docker Desktop (en erreur), Claude.
 
 | Phase | n | VRAM min–max (Mio) | RAM système max (Mio) | RSS python max (Mio) | RSS ollama max (Mio) | GPU °C max | Util. GPU moy. | Puiss. max (W) | Ventilo GPU max | CPU moy. |
@@ -592,7 +643,7 @@ Les invariants 2 (le LLM planifie) et 3 (validateur déterministe) reposent sur 
 1. **Au repos, Atlas démarré et inactif** : VRAM **1,53–1,63 Go**, identique au bureau seul. Atlas n'occupe pas de VRAM tant que le LLM n'est pas chargé : torch en build CPU et modèle Whisper pas encore chargé. RAM système 16,35 Go (+~0,4 Go vs sans Atlas). Processus Atlas **~565 Mio** RSS.
 2. **LLM chargé seul** : VRAM **6,43–6,45 Go** avec `num_ctx=8192`, soit **+4,86 Go**. Répartition Ollama : modèle 4 168 + KV 448 + calcul 140 = 4 756 Mio. Avec le contexte réellement utilisé par Atlas (4 096), le cache KV est plus petit ; non isolé par mesure.
 3. **Pic sur chaîne complète** : **6,53–6,57 Go** (STT GPU + planification + actions). Pic absolu observé **6,70 Go** (LLM + un processus whisper GPU supplémentaire). Marge : **~1,45–1,6 Go** sur 8,15 Go. Moins de 7 Go, mais pas loin : arbitrages ci-dessous.
-4. **RAM système en pic** : **18,69 Go / 23,9 Go** (78 %). Côté Python, **4,18 Go** au total : Atlas ~0,57 Go + processus de mesure ~3,6 Go (EasyOCR torch CPU + embeddings e5-base + whisper + Piper). Dans Atlas réel, ces modèles vivraient dans le processus Atlas, soit **~4 Go de RSS** pour Atlas une fois tous les modèles chargés (extrapolation, non mesuré dans Atlas).
+4. **RAM système en pic** : **18,69 Go / 23,9 Go** (78 %) sans Docker ; **23,45 Go / 23,9 Go (98 %) avec Docker**, qui est la configuration documentée (C.2). Côté Python, **4,18 Go** au total : Atlas ~0,57 Go + processus de mesure ~3,6 Go (EasyOCR torch CPU + embeddings e5-base + whisper + Piper). Dans Atlas réel, ces modèles vivraient dans le processus Atlas, soit **~4 Go de RSS** pour Atlas une fois tous les modèles chargés (extrapolation, non mesuré dans Atlas).
 5. **Températures** : GPU **75 °C max** après 5 min à 83 % d'utilisation (144 W, ventilateur 65 %) ; 64 °C une minute après ; 59 °C 25 min après (ventilateur toujours à 65 %) ; 50–54 °C au repos, ventilateur à 0 % (mode semi-passif). **CPU : non mesurée.** `MSAcpi_ThermalZoneTemperature` renvoie « Accès refusé » sans droits admin, et la zone ACPI `\_TZ.TZ00` lisible reste figée à 27,9 °C : ce n'est pas le die CPU. Charge CPU moyenne pendant le stress : 86 %.
 
 **Latences mesurées (pour R07 et L10)**
@@ -609,6 +660,27 @@ Les invariants 2 (le LLM planifie) et 3 (validateur déterministe) reposent sur 
 | Pipeline planifié (C02) | 33,7 s |
 | Chargement EasyOCR + lecture plein écran (CPU) | 22,2 s |
 | TTS `.venv` (aucun son) / venv neuf activé (son) | 4,0 s / 6,2 s |
+
+### C.2 — Environnement complet avec Docker (après activation de la virtualisation, 19:18–19:24)
+
+Même échantillonneur. Docker Desktop actif (`assistant_chromadb`, `atlas_searxng` ; `assistant_ollama` arrêté). Ollama natif 0.34.1.
+
+| Phase | n | VRAM min–max (Mio) | RAM système max (Mio) | RSS python max (Mio) | GPU °C max | CPU moy. |
+|---|---|---|---|---|---|---|
+| Docker actif, sans Atlas | 6 | 1 501–1 643 | **20 458** | 0 | 61 | 43 % |
+| Atlas démarré, inactif | 10 | 1 478–1 521 | 20 718 | 433 | 61 | 45 % |
+| 1er `/api/chat` à froid (LLM ctx 4 096) | 12 | 1 417–6 070 | 21 639 | 1 288 | 63 | 54 % |
+| Chaîne : STT | 3 | 6 058–6 069 | 20 843 | 1 762 | 53 | 56 % |
+| Chaîne : pipeline (planif. + grounding) | 12 | 6 298–6 455 | 23 279 | 4 142 | 62 | 68 % |
+| Chaîne : EasyOCR | 4 | 6 433–**6 496** | **23 445** | 5 275 | 45 | 88 % |
+| Chaîne : TTS | 1 | 6 489 | 23 415 | 5 339 | 44 | 60 % |
+
+- Empreinte de Docker : `vmmemWSL` **8 344 Mio** de working set, alors que les conteneurs n'utilisent que 134 Mio (SearXNG) et 44 Mio (ChromaDB), selon `docker stats`. Surcoût RAM au repos : **+4,5 Go** par rapport à l'après-midi (15,97 → 20,46 Go).
+- **Pic RAM système : 23 445 Mio sur 23 910, soit 98 %** (L23). Le processus Atlas atteint ~1,3 Go après le premier chat (embeddings chargés).
+- VRAM : inchangée à ±0,2 Go (pic 6,50 Go ; Docker n'utilise pas le GPU puisque le conteneur Ollama est arrêté).
+- LLM : le modèle chargé par Atlas utilise un contexte de **4 096** (`ollama ps`), soit 4,7 Go affichés.
+
+**Arbitrage RAM proposé — NON appliqué :** limiter la VM WSL dans `%USERPROFILE%\.wslconfig` (`[wsl2]` → `memory=4GB`, à valider avec ChromaDB et SearXNG), ou ChromaDB natif + SearXNG seul sous Docker, ou décharger EasyOCR et les embeddings entre usages.
 
 **Arbitrages VRAM proposés — NON appliqués, décision du superviseur**
 
@@ -635,7 +707,10 @@ Emplacements cherchés : disque utilisateur (motifs *veille*, *watch*), Gmail (�
 |---|---|---|---|---|
 | piper-tts | 1.4.1 | 1.8.0 | TTS : la 1.4.1 casse le CLI (`pathvalidate`) ; l'API ≥ 1.3 est incompatible avec `_speak_sync` | **Élevée** (lié à L3) |
 | ctranslate2 | 4.7.1 | 4.8.2 | STT ; ne résout pas cuBLAS à lui seul | Moyenne |
-| Ollama | 0.34.0 | 0.34.1 (GitHub) | Watchdog de détection GPU expiré au démarrage à froid (L10) ; notes de version non lues | Moyenne |
+| Ollama (natif) | 0.34.0 → **0.34.1 installée automatiquement** au redémarrage de 18:59 | 0.34.1 | Watchdog de détection GPU expiré au démarrage à froid avec la 0.34.0 (L10) ; avec la 0.34.1, premier appel 46 s via Atlas (non décomposé) | Moyenne |
+| Ollama (image Docker) | 0.17.0 | — | Conteneur à retirer (L22) | Faible |
+| chromadb/chroma (image) | `latest` de mars 2026, serveur 1.0.0 | non vérifié | **Ne pas mettre à jour** avant d'avoir corrigé la persistance (L21) | **Élevée** |
+| searxng/searxng (image) | `latest` de mars 2026 | non vérifié | Fonctionnel (recherche JSON 200) | Faible |
 | sentence-transformers | 3.3.1 | 6.0.1 | Embeddings mémoire : **trois versions majeures** d'écart, changements cassants probables | Moyenne |
 | transformers | 4.57.6 | 5.17.0 | Transitive (embeddings) ; version majeure | Moyenne |
 | chromadb | 1.5.1 | 1.5.9 | Mémoire ; client 1.5.1 avec serveur natif 1.0.0 (API v2) fonctionnel | Faible |
