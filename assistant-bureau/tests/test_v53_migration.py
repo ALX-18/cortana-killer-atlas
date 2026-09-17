@@ -56,9 +56,7 @@ class TestVisionDisabled:
         from tools import grounding
 
         with patch.object(grounding, "_is_vision_enabled", return_value=False):
-            result = asyncio.get_event_loop().run_until_complete(
-                grounding._try_vision("SomeApp", "SomeElement")
-            )
+            result = asyncio.run(grounding._try_vision("SomeApp", "SomeElement"))
 
         assert result is not None
         assert result.get("success") is False
