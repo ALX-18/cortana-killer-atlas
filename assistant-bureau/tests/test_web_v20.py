@@ -21,7 +21,15 @@ from core.intent_engine import (
 #  Tests v2.0 (1-6)
 # ===================================================================
 
+def _searxng_up() -> bool:
+    try:
+        return httpx.get("http://127.0.0.1:8888/", timeout=2.0).status_code in (200, 302, 403)
+    except Exception:
+        return False
+
+
 @pytest.mark.anyio
+@pytest.mark.skipif(not _searxng_up(), reason="SearXNG non démarré (docker compose up -d)")
 async def test_01_searxng_heartbeat_under_3s():
     start = time.perf_counter()
     async with httpx.AsyncClient(timeout=3.0) as client:

@@ -1,13 +1,16 @@
 """
 Test d'intégration ChromaDB — Sprint v1.2
 
-Prérequis : Docker ChromaDB doit tourner sur localhost:8001.
+Cible : le serveur ChromaDB JETABLE démarré par tests/conftest.py (jamais la production).
+Ignoré proprement si ce serveur n'a pas pu démarrer.
 Lancer avec :
     python -m pytest tests/test_chroma_integration.py -v
 """
 
+import os
 import time
 import uuid
+from urllib.parse import urlparse
 
 import chromadb
 import httpx
@@ -17,8 +20,10 @@ import pytest
 #  Config — doit correspondre à settings.json
 # --------------------------------------------------------------------------- #
 
-CHROMA_HOST = "localhost"
-CHROMA_PORT = 8001
+TEST_CHROMA_URL = os.environ.get("ATLAS_TEST_CHROMA_URL")
+pytestmark = pytest.mark.skipif(not TEST_CHROMA_URL, reason="ChromaDB de test non démarré (voir tests/conftest.py)")
+CHROMA_HOST = urlparse(TEST_CHROMA_URL).hostname if TEST_CHROMA_URL else "127.0.0.1"
+CHROMA_PORT = urlparse(TEST_CHROMA_URL).port if TEST_CHROMA_URL else 0
 TEST_COLLECTION = f"atlas_test_{uuid.uuid4().hex[:8]}"
 
 

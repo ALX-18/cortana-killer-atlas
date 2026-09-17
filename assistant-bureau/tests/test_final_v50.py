@@ -41,8 +41,12 @@ class _DummyAsyncClient:
         return _DummyResp(200)
 
 
-def test_01_mono_instance_second_launch_exits_cleanly():
+def test_01_mono_instance_second_launch_exits_cleanly(monkeypatch, tmp_path):
+    import main
     from main import acquire_instance_lock, release_instance_lock
+
+    # Verrou dans un dossier temporaire : ne jamais toucher data/atlas.lock d'une instance réelle.
+    monkeypatch.setattr(main, "LOCK_FILE", tmp_path / "atlas.lock")
 
     ok1, _ = acquire_instance_lock()
     if not ok1:
@@ -159,7 +163,9 @@ def test_06_api_health_returns_all_services(monkeypatch):
 def test_07_api_errors_recent_returns_last_n_actionable(monkeypatch):
     import api.routes as routes
 
-    log_path = Path(__file__).resolve().parent.parent / "data" / "atlas_actions.jsonl"
+    from core.atlas_logger import LOG_FILE as log_path  # redirigé par tests/conftest.py
+
+    assert "atlas_tests_root_" in str(log_path)
     previous = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
 
     try:

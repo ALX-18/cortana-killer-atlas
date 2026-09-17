@@ -7,8 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-LOG_FILE = PROJECT_ROOT / "data" / "atlas_actions.jsonl"
+from core.atlas_logger import LOG_FILE  # redirigé vers un dossier temporaire par tests/conftest.py
+
+assert "atlas_tests_root_" in str(LOG_FILE), "isolation des données inactive (tests/conftest.py)"
 
 
 @pytest.fixture(autouse=True)

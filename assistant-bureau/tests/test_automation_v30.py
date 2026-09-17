@@ -18,10 +18,15 @@ import pytest
 # Ensure project root is in path
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
-SCHEDULES_FILE = DATA_DIR / "schedules.json"
-TRIGGERS_FILE = DATA_DIR / "triggers.json"
-WORKFLOWS_DIR = DATA_DIR / "workflows"
+import core.scheduler as _scheduler_mod
+import core.trigger_engine as _trigger_mod
+import core.workflow_engine as _workflow_mod
+
+# Chemins lus dans les modules : tests/conftest.py les redirige vers un dossier temporaire.
+SCHEDULES_FILE = _scheduler_mod.SCHEDULES_FILE
+TRIGGERS_FILE = _trigger_mod.TRIGGERS_FILE
+WORKFLOWS_DIR = _workflow_mod.WORKFLOWS_DIR
+assert "atlas_tests_root_" in str(SCHEDULES_FILE), "isolation des données inactive (tests/conftest.py)"
 
 
 # --------------------------------------------------------------------------- #

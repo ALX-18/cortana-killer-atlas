@@ -118,21 +118,30 @@ def test_lifespan():
 
 
 if __name__ == "__main__":
-    print("=== Sprint 1.2 Validation ===\n")
+    # Sprint B-minimal : mêmes redirections que la suite pytest, aucune écriture dans le vrai data/.
+    import shutil
+    from tests.conftest import _isolate_data
+
+    test_root = _isolate_data()
+    print(f"(données de test : {test_root})")
+    try:
+        print("=== Sprint 1.2 Validation ===\n")
     
-    print("[P2.2] Parser tool-calls strict:")
-    test_parser()
+        print("[P2.2] Parser tool-calls strict:")
+        test_parser()
     
-    print("\n[P3] Sécurité PowerShell:")
-    test_powershell_security()
+        print("\n[P3] Sécurité PowerShell:")
+        test_powershell_security()
     
-    print("\n[P2.1] SQLite habits:")
-    test_sqlite_habits()
+        print("\n[P2.1] SQLite habits:")
+        test_sqlite_habits()
     
-    print("\n[P3] Audit log:")
-    test_audit_log()
+        print("\n[P3] Audit log:")
+        test_audit_log()
     
-    print("\n[P1.2] Lifespan migration:")
-    test_lifespan()
+        print("\n[P1.2] Lifespan migration:")
+        test_lifespan()
     
-    print("\n=== ALL TESTS PASSED ===")
+        print("\n=== ALL TESTS PASSED ===")
+    finally:
+        shutil.rmtree(test_root, ignore_errors=True)

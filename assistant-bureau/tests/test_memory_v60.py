@@ -29,7 +29,7 @@ from core.error_learning import (
 def _chroma_up() -> bool:
     try:
         import chromadb
-        c = chromadb.HttpClient(host="localhost", port=8001)
+        c = chromadb.HttpClient()  # redirigé vers le serveur jetable par tests/conftest.py
         c.heartbeat()
         return True
     except Exception:
@@ -37,7 +37,7 @@ def _chroma_up() -> bool:
 
 
 CHROMA = _chroma_up()
-live = pytest.mark.skipif(not CHROMA, reason="ChromaDB (Docker) non disponible")
+live = pytest.mark.skipif(not CHROMA, reason="ChromaDB de test non disponible (voir tests/conftest.py)")
 
 
 @pytest.fixture
