@@ -18,7 +18,7 @@ import os
 import time
 import asyncio
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # scripts/manual/ -> racine
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
 from tools.app_launcher import launch_app

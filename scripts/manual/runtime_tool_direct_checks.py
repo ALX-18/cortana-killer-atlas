@@ -3,7 +3,7 @@ import os
 import pathlib
 import sys
 
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent  # scripts/manual/ -> racine
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT))
 

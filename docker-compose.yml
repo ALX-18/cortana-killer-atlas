@@ -8,7 +8,6 @@ services:
     # Image épinglée par digest (chroma 1.4.1). Ne pas repasser à :latest sans migration vérifiée
     # (scripts/backup_memory.py backup + verify).
     image: chromadb/chroma@sha256:7605e7b398f96dba833ed1b6272f815b9d33414dde45c68bd246e84447db8591
-    pull_policy: never
     container_name: atlas_chromadb
     ports:
       - "8001:8000"
@@ -25,13 +24,18 @@ services:
     restart: unless-stopped
 
   searxng:
-    image: searxng/searxng
+    # Épinglée par digest comme ChromaDB (sprint C) : pas de changement de version silencieux.
+    image: searxng/searxng@sha256:edf110a2816d8963949d03879c72a7e19c221b5f7bfb7952a33ae073f96ccb18
     container_name: atlas_searxng
     ports:
       - "8888:8080"
     volumes:
       - ./config/searxng:/etc/searxng
+      # Volume nommé : sans lui, un volume anonyme est créé à chaque recréation du conteneur.
+      - atlas_searxng_cache:/var/cache/searxng
     environment:
+      # Valeur de remplacement, sans effet de sécurité réel : service local, non exposé.
+      # À remplacer par un secret hors dépôt le jour où SearXNG sort de 127.0.0.1.
       - SEARXNG_SECRET_KEY=atlas_secret_key_change_me
     restart: unless-stopped
 
@@ -58,6 +62,9 @@ volumes:
   # Créé hors compose (sprint M-bis) : ni `docker compose down` ni `down -v` ne peuvent le supprimer.
   atlas_chromadb_data:
     external: true
+  # Cache SearXNG : régénérable, géré par compose. `name:` évite le préfixe de projet.
+  atlas_searxng_cache:
+    name: atlas_searxng_cache
   # Volume existant de l'ancien projet (contient mistral), réutilisé tel quel.
   ollama_data:
     name: assistant-bureau_ollama_data

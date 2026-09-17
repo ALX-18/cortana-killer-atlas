@@ -9,7 +9,8 @@ from pathlib import Path
 import yaml
 
 COMPOSE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
-DIGEST = "sha256:7605e7b398f96dba833ed1b6272f815b9d33414dde45c68bd246e84447db8591"
+CHROMA_DIGEST = "sha256:7605e7b398f96dba833ed1b6272f815b9d33414dde45c68bd246e84447db8591"
+SEARXNG_DIGEST = "sha256:edf110a2816d8963949d03879c72a7e19c221b5f7bfb7952a33ae073f96ccb18"
 
 
 def _compose() -> dict:
@@ -21,10 +22,20 @@ def test_project_name_is_atlas():
     assert _compose()["name"] == "atlas"
 
 
-def test_chromadb_image_pinned_by_digest_without_pull():
-    svc = _compose()["services"]["chromadb"]
-    assert svc["image"] == f"chromadb/chroma@{DIGEST}"
-    assert svc["pull_policy"] == "never"
+def test_images_pinned_by_digest():
+    services = _compose()["services"]
+    assert services["chromadb"]["image"] == f"chromadb/chroma@{CHROMA_DIGEST}"
+    assert services["searxng"]["image"] == f"searxng/searxng@{SEARXNG_DIGEST}"
+    # Un digest interdit déjà tout changement de version ; `pull_policy: always` serait inutile,
+    # et `never` empêcherait une installation neuve de récupérer l'image (corrigé au sprint C).
+    for name in ("chromadb", "searxng"):
+        assert services[name].get("pull_policy") in (None, "missing", "if_not_present")
+
+
+def test_searxng_cache_on_named_volume():
+    compose = _compose()
+    assert "atlas_searxng_cache:/var/cache/searxng" in compose["services"]["searxng"]["volumes"]
+    assert "atlas_searxng_cache" in compose["volumes"]
 
 
 def test_chromadb_data_on_external_named_volume():
