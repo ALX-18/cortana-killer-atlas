@@ -1,4 +1,9 @@
-"""Test rapide via l'API /api/chat pour verifier le nettoyage."""
+"""Test rapide via l'API /api/chat pour verifier le nettoyage.
+
+Déplacé de tests/ au sprint B-minimal : envoie de VRAIES commandes à une instance Atlas démarrée
+(/api/chat sur localhost:8550 — « ouvre steam », etc.).
+Usage : python scripts/manual/api_clean_check.py
+"""
 import requests
 import json
 

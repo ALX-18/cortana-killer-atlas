@@ -1,7 +1,12 @@
-"""Test rapide du nettoyage JSON dans process_ai_response."""
+"""Vérification manuelle du nettoyage JSON dans process_ai_response.
+
+Déplacé de tests/ au sprint B-minimal : EXÉCUTE DE VRAIS OUTILS (dont launch_app steam).
+Usage : python scripts/manual/cleanup_check.py
+"""
 import asyncio
+import os
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 from core.intent_engine import process_ai_response
 

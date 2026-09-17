@@ -1,9 +1,13 @@
-"""Test SQLite habit persistence across simulated restarts."""
+"""Vérification manuelle : persistance SQLite des habitudes après un redémarrage simulé.
+
+Déplacé de tests/ au sprint B-minimal : ÉCRIT DANS LE VRAI data/habits.db (puis nettoie).
+Usage : python scripts/manual/habit_persistence_check.py
+"""
 import sqlite3
 import os
 import sys
 
-os.chdir(os.path.join(os.path.dirname(__file__), ".."))
+os.chdir(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.getcwd())
 
 from core.context_monitor import _init_db, _persist_habit, _DB_PATH

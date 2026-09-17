@@ -1,4 +1,9 @@
-"""Test rapide du fix streaming JSON."""
+"""Test rapide du fix streaming JSON.
+
+Déplacé de tests/ au sprint B-minimal : envoie de VRAIES commandes à une instance Atlas démarrée
+(/api/chat/stream sur localhost:8550 — « ouvre steam », etc.).
+Usage : python scripts/manual/stream_fix_check.py
+"""
 import requests
 import json
 
