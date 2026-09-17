@@ -17,7 +17,11 @@ services:
       - atlas_chromadb_data:/data
     environment:
       - ANONYMIZED_TELEMETRY=FALSE
-      - ALLOW_RESET=TRUE
+      # Aucun appel `reset` ne doit pouvoir effacer la mémoire (sprint B-minimal, BM7).
+      # Constaté au sprint B-minimal : le serveur 1.4.1 ignore cette variable. C'est l'absence de
+      # `allow_reset: true` dans son /config.yaml qui refuse `reset` (HTTP 403). La variable est
+      # gardée à FALSE pour documenter l'intention et couvrir une image qui la lirait.
+      - ALLOW_RESET=FALSE
     restart: unless-stopped
 
   searxng:
