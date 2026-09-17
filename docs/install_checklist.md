@@ -11,7 +11,7 @@
 Diagnostic automatique à tout moment, une fois l'étape 4 faite :
 
 ```powershell
-cd assistant-bureau
+cd C:\Atlas          # racine du dépôt
 python scripts\doctor.py
 ```
 
@@ -49,7 +49,7 @@ chacune est suivie d'une correction.
   git clone <url-du-depot> C:\Atlas
   cd C:\Atlas
   ```
-- [ ] Vérification : `assistant-bureau\main.py` existe.
+- [ ] Vérification : `main.py` existe à la racine du dépôt.
 
 ## 2. Python 3.12
 
@@ -63,7 +63,7 @@ chacune est suivie d'une correction.
 
 ## 3. Environnement virtuel
 
-Le script `start_atlas_desktop.bat` attend le venv **à la racine du dépôt**, dans `.venv` (à côté de `assistant-bureau\`).
+Le script `start_atlas_desktop.bat` attend le venv **à la racine du dépôt**, dans `.venv`, à côté de `main.py`.
 
 - [ ] Création et activation :
   ```powershell
@@ -78,9 +78,8 @@ Le script `start_atlas_desktop.bat` attend le venv **à la racine du dépôt**, 
 
 ## 4. Dépendances Python
 
-- [ ] Installation (environ 10 min, ~2 Go téléchargés, torch compris) :
+- [ ] Installation (environ 10 min, ~2 Go téléchargés, torch compris), depuis la racine du dépôt :
   ```powershell
-  cd assistant-bureau
   python -m pip install -r requirements.txt
   ```
   Les paquets Windows `pywin32`, `comtypes`, `pycaw` et `wmi` en font partie.
@@ -154,7 +153,7 @@ Atlas attend ChromaDB sur `localhost:8001` (`memory.chroma_port`). Sans lui, Atl
   ```powershell
   docker volume create atlas_chromadb_data
   ```
-- [ ] Depuis `assistant-bureau\` (projet compose `atlas`, image ChromaDB épinglée par digest) :
+- [ ] Depuis la racine du dépôt (projet compose `atlas`, image ChromaDB épinglée par digest) :
   ```powershell
   docker compose up -d
   ```
@@ -171,7 +170,6 @@ Atlas attend ChromaDB sur `localhost:8001` (`memory.chroma_port`). Sans lui, Atl
 **Option B — natif, sans Docker** (utilisée au sprint A, faute de virtualisation) :
 - [ ] Dans un terminal dédié, venv activé :
   ```powershell
-  cd assistant-bureau
   chroma run --path data\chromadb_native --host localhost --port 8001
   ```
   ⚠ Ne pas pointer `--path` sur `data\chromadb` s'il contient déjà une base créée par l'image Docker : la compatibilité de format entre versions n'a pas été vérifiée.
@@ -207,7 +205,7 @@ Le fichier est versionné et fonctionne tel quel. Points à relire :
 
 ## 11. Modèles voix
 
-- [ ] Venv activé, depuis `assistant-bureau\` :
+- [ ] Venv activé, depuis la racine du dépôt :
   ```powershell
   python scripts\download_voice_models.py
   ```
@@ -243,7 +241,6 @@ Le fichier est versionné et fonctionne tel quel. Points à relire :
 
 - [ ] ⚠ Créer `logs\`. Il n'est pas versionné (`.gitignore`), et `main.py` y ouvre `atlas.log` **à l'import** sans créer le dossier, ce qui fait planter un clone neuf avec `FileNotFoundError`.
   ```powershell
-  cd assistant-bureau
   mkdir logs -ErrorAction SilentlyContinue
   mkdir data -ErrorAction SilentlyContinue
   ```
@@ -251,7 +248,7 @@ Le fichier est versionné et fonctionne tel quel. Points à relire :
 ## 13. Premier lancement
 
 - [ ] `python scripts\doctor.py` renvoie le code 0.
-- [ ] Toujours depuis `assistant-bureau\`, venv activé (le grounding écrit ses captures dans `data\debug`, un chemin relatif au **répertoire courant**) :
+- [ ] Toujours depuis la racine du dépôt, venv activé (le grounding écrit ses captures dans `data\debug`, un chemin relatif au **répertoire courant**) :
   ```powershell
   python main.py
   ```
@@ -267,7 +264,6 @@ Le fichier est versionné et fonctionne tel quel. Points à relire :
 ## 14. Tests (optionnel, développeurs)
 
 ```powershell
-cd assistant-bureau
 $env:PYTHONIOENCODING = "utf-8"
 python -m pytest tests/ -q --continue-on-collection-errors
 python tests\test_architecture_v23.py

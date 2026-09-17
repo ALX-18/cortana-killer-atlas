@@ -41,7 +41,7 @@ IdentityCard(base_identity, persona_overlay=None).build_system_prompt()
 ```bash
 cd ~/Projet/cortana-killer-atlas
 git pull
-cd assistant-bureau/core_conversational
+cd core_conversational
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r ../../requirements-core-conversational.txt
 python -m pytest ../tests/test_core_conversational.py -v

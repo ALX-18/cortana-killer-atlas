@@ -36,7 +36,6 @@ Atlas utilise Tesseract pour la reconnaissance de texte à l'écran (couche OCR 
 ## Installation
 
 ```bash
-cd assistant-bureau
 pip install -r requirements.txt
 ```
 
@@ -96,7 +95,7 @@ Doit passer en **< 5 secondes**.
 ## Architecture
 
 ```
-assistant-bureau/
+cortana-killer-atlas/            # racine du dépôt (aplatie au sprint C)
 ├── main.py              # Point d'entrée FastAPI (lifespan)
 ├── api/
 │   ├── routes.py        # Endpoints REST + SSE streaming

@@ -25,7 +25,7 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# === Données runtime sensibles (chemins relatifs et assistant-bureau/) ===
+# === Données runtime sensibles ===
 data/chromadb/
 data/habits.db
 data/audit_log.jsonl
@@ -43,34 +43,17 @@ data/*.sqlite3
 data/*.jsonl
 data/*.lock
 
-assistant-bureau/data/chromadb/
-assistant-bureau/data/habits.db
-assistant-bureau/data/audit_log.jsonl
-assistant-bureau/data/atlas_actions.jsonl
-assistant-bureau/data/schedules.json
-assistant-bureau/data/triggers.json
-assistant-bureau/data/file_index.json
-assistant-bureau/data/file_reorg_history.jsonl
-assistant-bureau/data/atlas.lock
-assistant-bureau/data/debug/
-assistant-bureau/data/screenshots/
-assistant-bureau/data/*.db
-assistant-bureau/data/*.sqlite
-assistant-bureau/data/*.sqlite3
-assistant-bureau/data/*.jsonl
-assistant-bureau/data/*.lock
 
 # === Rapports de profiling avec chemins système ===
-assistant-bureau/rapport_ollama_config.txt
-assistant-bureau/rapport_profile_minicpm.txt
 rapport_ollama_config.txt
 rapport_profile_minicpm.txt
 
 # === Workflow perso (à valider au cas par cas) ===
-assistant-bureau/data/workflows/workflow_discord_spotify.yaml
+data/workflows/workflow_discord_spotify.yaml
 
 # === Modèles ML lourds (jamais sur Git) ===
 models/
+data/voices/
 *.onnx
 *.gguf
 *.bin
@@ -93,10 +76,9 @@ secrets/
 *.pem
 config/settings.local.json
 config/oauth_tokens/
-assistant-bureau/config/oauth_tokens/
 
 # === Audit results perso ===
-assistant-bureau/tests/audit_results_v22.json
+tests/audit_results_v22.json
 
 # === Docker ===
 docker-compose.override.yml

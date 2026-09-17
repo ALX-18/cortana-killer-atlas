@@ -17,7 +17,7 @@ bloquant, à reprendre quand ce sera la priorité (cf. RAPPORT_V602.md section 6
    `openwakeword`, `faster-whisper`, `piper-tts`, `sounddevice`, `pystray`, `onnxruntime`.
 2. Modèles voix téléchargés :
    ```
-   cd assistant-bureau
+   cd <racine du dépôt>
    python scripts/download_voice_models.py
    ```
    Ce script télécharge, de façon idempotente (ne re-télécharge pas ce qui existe déjà) :
