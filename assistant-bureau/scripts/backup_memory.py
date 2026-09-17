@@ -7,10 +7,13 @@ nommé `atlas_chromadb_data`, monté dans `atlas_chromadb` (projet compose `atla
 copie `/data` hors du conteneur, quel que soit le montage, et prouve que la copie est restaurable.
 
 Garanties :
-- sur le conteneur de production, UNIQUEMENT des lectures : `docker inspect`,
-  `docker exec` (sha256sum, find, cat) et `docker cp` depuis le conteneur, plus des requêtes
-  HTTP de lecture (list, count, get) ;
-- aucune commande `docker rm`, `stop`, `restart`, `compose` sur la production ;
+- toute commande `docker` passe par une LISTE BLANCHE (`check_docker_args`) : tout ce qui n'y est
+  pas explicitement autorisé est refusé avant exécution, `compose` comprise (leçon de l'incident
+  I-1, sprint M-bis). Cette liste est testée avec un `subprocess` simulé
+  (tests/test_backup_memory_guard.py), jamais avec de vraies commandes ;
+- sur le conteneur de production, UNIQUEMENT des lectures : `docker inspect`, `docker exec` limité
+  aux deux scripts de lecture du module, `docker cp` du conteneur vers l'hôte, plus des requêtes
+  HTTP de lecture (list, count, get, query) ;
 - la vérification tourne dans un conteneur jetable (`atlas_memcheck_*`, autre port, même
   image par identifiant, `--pull never`) sur une COPIE de la sauvegarde, puis le supprime.
 
@@ -49,6 +52,10 @@ PROTECTED = PROD_CONTAINERS + (PROD_VOLUME,)
 CHECK_PREFIX = "atlas_memcheck_"
 DATA_DIR = "/data"
 API = "/api/v2/tenants/default_tenant/databases/default_database"
+# Seuls scripts autorisés pour `docker exec` (lecture seule).
+HASH_SCRIPT = f"find {DATA_DIR} -type f -exec sha256sum {{}} +"
+CONFIG_SCRIPT = "cat /config.yaml 2>/dev/null; chroma --version 2>/dev/null"
+READONLY_EXEC_SCRIPTS = (HASH_SCRIPT, CONFIG_SCRIPT)
 DEFAULT_DEST = Path.home() / "Atlas_backups" / "memoire"
 
 
@@ -60,11 +67,68 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+class GuardRefusal(RuntimeError):
+    """Commande docker refusée par la liste blanche."""
+
+
+def _option(args: list[str], name: str) -> str | None:
+    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else None
+
+
+def _container_ref(value: str) -> bool:
+    # « nom:/chemin » (conteneur) ; « C:\... » (lecteur Windows, une seule lettre) n'en est pas un.
+    name, sep, path = value.partition(":")
+    return bool(sep) and len(name) > 1 and path.startswith("/")
+
+
+def check_docker_args(args: tuple[str, ...] | list[str]) -> None:
+    """Liste blanche des commandes docker du script. Lève GuardRefusal pour tout le reste."""
+    args = list(args)
+
+    def refuse(why: str):
+        raise GuardRefusal(f"Refus du garde-fou ({why}) : docker {' '.join(args)}")
+
+    if not args:
+        refuse("commande vide")
+    sub, rest = args[0], args[1:]
+    if sub in ("inspect", "ps"):
+        return
+    if sub == "volume":
+        if rest[:1] == ["inspect"]:
+            return
+        refuse("seul « volume inspect » est autorisé")
+    if sub == "exec":
+        if len(rest) == 4 and rest[1:3] == ["sh", "-c"] and rest[3] in READONLY_EXEC_SCRIPTS:
+            return
+        refuse("exec limité aux scripts de lecture du module")
+    if sub == "cp":
+        if len(rest) == 2 and _container_ref(rest[0]) and not _container_ref(rest[1]):
+            return
+        refuse("cp autorisé uniquement du conteneur vers l'hôte")
+    if sub in ("run", "create"):
+        if _option(rest, "--pull") != "never":
+            refuse("--pull never obligatoire")
+        name = _option(rest, "--name")
+        if name is not None and not name.startswith(CHECK_PREFIX):
+            refuse(f"nom de conteneur hors préfixe {CHECK_PREFIX}")
+        if name is None and not (sub == "run" and "--rm" in rest):
+            refuse("conteneur sans nom jetable ni --rm")
+        for i, a in enumerate(rest):
+            if a in ("-v", "--volume") and i + 1 < len(rest):
+                mount = rest[i + 1]
+                if mount.startswith(f"{PROD_VOLUME}:") and not mount.endswith(":ro"):
+                    refuse("volume de production monté en écriture")
+        return
+    if sub == "rm":
+        targets = [a for a in rest if not a.startswith("-")]
+        if targets and all(t.startswith(CHECK_PREFIX) for t in targets):
+            return
+        refuse(f"rm limité aux conteneurs {CHECK_PREFIX}*")
+    refuse(f"sous-commande « {sub} » hors liste blanche")
+
+
 def docker(*args: str, check: bool = True, timeout: float = 300) -> str:
-    # Garde-fou : aucune commande mutante ne doit viser la production.
-    mutating = {"rm", "stop", "kill", "restart", "pause", "unpause", "update", "rename", "compose", "volume"}
-    if args and args[0] in mutating and any(p == a or f"{p}:" in a for p in PROTECTED for a in args[1:]):
-        raise RuntimeError(f"Refus : commande mutante sur une ressource protégée : docker {' '.join(args)}")
+    check_docker_args(args)  # AVANT toute exécution
     proc = subprocess.run(["docker", *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout)
     if check and proc.returncode != 0:
@@ -89,7 +153,7 @@ def sha256_file(p: Path) -> str:
 
 
 def container_hashes(container: str) -> dict[str, str]:
-    out = docker("exec", container, "sh", "-c", f"find {DATA_DIR} -type f -exec sha256sum {{}} +")
+    out = docker("exec", container, "sh", "-c", HASH_SCRIPT)
     hashes = {}
     for line in out.splitlines():
         digest, _, path = line.partition("  ")
@@ -185,7 +249,7 @@ def cmd_backup(args) -> int:
         log(f"ERREUR : {container} n'est pas démarré.")
         return 1
     image_id = state["Image"]
-    config = docker("exec", container, "sh", "-c", "cat /config.yaml 2>/dev/null; chroma --version 2>/dev/null")
+    config = docker("exec", container, "sh", "-c", CONFIG_SCRIPT)
     log(f"Conteneur {container} — image {image_id[:19]} — {config.strip().splitlines()[-1]} — /data : {data_mount(state)}")
     if f'persist_path: "{DATA_DIR}"' not in config:
         log(f"ERREUR : persist_path inattendu, ce script ne sait sauvegarder que {DATA_DIR} :\n{config}")
