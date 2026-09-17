@@ -322,6 +322,9 @@ def _find_candidate_windows(app_title: str) -> list[Any]:
     try:
         import pygetwindow as gw
 
+        if not (app_title or "").strip():
+            return []  # B1 : un titre vide sélectionnerait toutes les fenêtres
+
         title_norm = _normalize_text(app_title)
         if "steam" in title_norm:
             all_windows = gw.getAllWindows()
@@ -1492,6 +1495,26 @@ async def find_and_click(
     """
     if not element_name:
         return {"success": False, "method": "none", "message": "Pas d'élément spécifié."}
+
+    # B1 / L24 : sans application nommée, gw.getWindowsWithTitle("") renvoie TOUTES les
+    # fenêtres et le choix se porte sur la fenêtre active — un clic pouvait donc partir
+    # dans n'importe quelle application (sprint A, C05). On refuse au lieu de deviner.
+    if not (app_title or "").strip():
+        logger.warning("[GROUNDING] Clic refusé : aucune application cible pour '%s'", element_name)
+        return {
+            "success": False,
+            "method": "no_target",
+            "message": f"Aucune application cible pour cliquer sur '{element_name}'. Précise l'application.",
+        }
+
+    candidate_windows = _find_candidate_windows(app_title)
+    if not candidate_windows:
+        logger.warning("[GROUNDING] Fenêtre '%s' introuvable — aucune couche tentée", app_title)
+        return {
+            "success": False,
+            "method": "app_not_found",
+            "message": f"Fenêtre '{app_title}' introuvable. Aucun clic effectué.",
+        }
 
     app_type = _detect_app_type(app_title)
     try:

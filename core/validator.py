@@ -64,6 +64,10 @@ class ResolvedAction:
     verification: VerificationRule = field(default_factory=VerificationRule)
     fallback: Optional[str] = None
     intent: Optional[IntentResult] = None
+    # B1 : action refusée par le validateur (paramètre invalide, cible indéterminée).
+    # Rien n'est exécuté ; `tool` porte alors une réponse conversationnelle explicative.
+    rejected: bool = False
+    rejection_reason: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -83,9 +87,79 @@ _BROWSER_PROCESSES = {
 # Destructive actions
 _DESTRUCTIVE_VERBS = {"close", "kill", "shutdown", "restart"}
 
+# --------------------------------------------------------------------------- #
+#  B1 / L5 — touches autorisées pour window_hotkey
+#
+#  Liste blanche, comme le garde-fou docker du sprint B-minimal : on autorise
+#  explicitement, on refuse le reste. Sans elle, le planificateur pouvait produire
+#  window_hotkey {"keys": "Fichier"}, que l'exécuteur décomposait en sept frappes
+#  (F, i, c, h, i, e, r) envoyées à la fenêtre active (rapport A, L5 / C02).
+# --------------------------------------------------------------------------- #
+
+_MODIFIER_KEYS = {"ctrl", "ctrlleft", "ctrlright", "alt", "altleft", "altright",
+                  "shift", "shiftleft", "shiftright", "win", "winleft", "winright", "command", "option"}
+
+_NAMED_KEYS = {
+    "enter", "return", "tab", "esc", "escape", "space", "backspace", "delete", "del", "insert",
+    "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
+    "capslock", "numlock", "scrolllock", "printscreen", "pause", "apps", "menu",
+    "volumeup", "volumedown", "volumemute", "playpause", "nexttrack", "prevtrack",
+}
+_FUNCTION_KEYS = {f"f{i}" for i in range(1, 25)}
+_CHARACTER_KEYS = set("abcdefghijklmnopqrstuvwxyz0123456789") | {
+    "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "`", "+", "*",
+}
+VALID_HOTKEY_KEYS = _MODIFIER_KEYS | _NAMED_KEYS | _FUNCTION_KEYS | _CHARACTER_KEYS
+
+_MAX_HOTKEY_KEYS = 5
+
+
+def normalize_hotkey_keys(raw) -> tuple[list[str], str]:
+    """Normalise des touches en liste minuscule. Retourne (touches, erreur).
+
+    Accepte une liste (["ctrl", "s"]) ou une chaîne de combinaison ("ctrl+s", "ctrl s").
+    Toute touche hors liste blanche invalide l'ensemble : une chaîne comme « Fichier »
+    est du texte, pas un raccourci.
+    """
+    if isinstance(raw, str):
+        parts = [p for p in raw.replace("+", " ").split() if p]
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        return [], f"paramètre 'keys' de type {type(raw).__name__}, attendu une liste ou une chaîne"
+
+    if not parts:
+        return [], "aucune touche fournie"
+    if len(parts) > _MAX_HOTKEY_KEYS:
+        return [], f"{len(parts)} touches, maximum {_MAX_HOTKEY_KEYS}"
+
+    keys = []
+    for part in parts:
+        if not isinstance(part, str):
+            return [], f"touche {part!r} : type {type(part).__name__} au lieu d'une chaîne"
+        key = part.strip().lower()
+        if key not in VALID_HOTKEY_KEYS:
+            return [], f"touche inconnue : {part!r}"
+        keys.append(key)
+    return keys, ""
+
 
 class Validator:
     """Mappe une intention vers un outil exact de façon déterministe."""
+
+    def _reject(self, intent: IntentResult, reason: str, advice: str = "") -> ResolvedAction:
+        """Refuse une action sans rien exécuter, avec un message destiné à l'utilisateur."""
+        logger.warning("[VALIDATOR] Action refusée (%s/%s) : %s", intent.category, intent.verb, reason)
+        message = f"Action refusée : {reason}."
+        if advice:
+            message += f" {advice}"
+        return ResolvedAction(
+            tool="__conversation__",
+            params={"message": message},
+            intent=intent,
+            rejected=True,
+            rejection_reason=reason,
+        )
 
     def resolve(self, intent: IntentResult, context: dict) -> ResolvedAction:
         """
@@ -249,14 +323,21 @@ class Validator:
                     app_title = _resolve_implicit_app(get_world_state(), context)
                     if app_title:
                         logger.info("[Validator] app_title résolu via last_action: '%s'", app_title)
+                # B1 / L24 : plus de repli sur la fenêtre au premier plan. Elle n'a aucun
+                # rapport avec la demande : au sprint A, « clique sur Fichier » a été cherché
+                # dans une conversation Discord active (C05). Sans cible nommée ni contexte
+                # de travail récent, on échoue explicitement.
                 if not app_title:
-                    fg = context.get("foreground_window", {}) or {}
-                    fg_title = fg.get("title", "")
-                    if fg_title and not _is_atlas_desktop(fg_title):
-                        app_title = fg_title
-                        logger.info("[Validator] app_title résolu via foreground: '%s'", app_title)
-                    elif fg_title:
-                        logger.info("[Validator] foreground='%s' ignoré (Atlas Desktop) — app implicite non résolue", fg_title)
+                    fg_title = (context.get("foreground_window", {}) or {}).get("title", "")
+                    logger.info(
+                        "[Validator] aucune application nommée ; premier plan '%s' NON utilisé (L24)",
+                        fg_title or "?",
+                    )
+                    return self._reject(
+                        intent,
+                        "application cible indéterminée pour le clic",
+                        "Précise l'application, par exemple « clique sur Fichier dans le bloc-notes ».",
+                    )
                 params = {
                     "element_name": params.get("element_name", target or ""),
                     "app_title": app_title,
@@ -266,7 +347,16 @@ class Validator:
                 tool_name = "window_type"
 
             elif verb == "hotkey":
+                # B1 / L5 : les touches viennent du LLM, elles ne sont pas fiables.
+                keys, error = normalize_hotkey_keys(params.get("keys"))
+                if error:
+                    return self._reject(
+                        intent,
+                        f"raccourci clavier invalide ({error})",
+                        "Pour saisir du texte, utilise une demande de frappe explicite.",
+                    )
                 tool_name = "window_hotkey"
+                params = {**params, "keys": keys}
 
         # --- Process specializations ---
         elif category == "process":
