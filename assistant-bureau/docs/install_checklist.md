@@ -150,20 +150,23 @@ Atlas attend ChromaDB sur `localhost:8001` (`memory.chroma_port`). Sans lui, Atl
 
 **Option A — Docker (voie documentée)**, qui exige l'étape 0 « virtualisation » :
 - [ ] Docker Desktop installé et démarré (`docker info` répond).
-- [ ] Depuis `assistant-bureau\` :
+- [ ] **Volume de la mémoire** (à créer une seule fois ; il est déclaré `external` et compose ne le crée ni ne le supprime jamais) :
   ```powershell
-  docker compose up -d chromadb searxng
+  docker volume create atlas_chromadb_data
   ```
-  ⚠ **Ne jamais** lancer `docker compose up -d` sans nommer les services : le service `ollama` démarrerait aussi et prendrait `[::]:11434`. Il redémarre ensuite **à chaque lancement de Docker Desktop** (`restart: unless-stopped`). Vu sur le terrain : `localhost:11434` répondait par l'Ollama du conteneur (0.17.0, sans `qwen2.5:7b`). Si c'est déjà fait :
+- [ ] Depuis `assistant-bureau\` (projet compose `atlas`, image ChromaDB épinglée par digest) :
   ```powershell
-  docker stop assistant_ollama
+  docker compose up -d
   ```
-- [ ] ⚠ **Persistance de la mémoire** : l'image `chromadb/chroma` actuelle écrit dans `/data`, alors que `docker-compose.yml` monte `data\chromadb` sur `/chroma/chroma`. Les données restent donc **dans le conteneur** : `docker compose down`, `docker rm` ou une mise à jour de l'image les effacent. Tant que ce n'est pas corrigé (sprint B) :
+  Cette commande démarre `atlas_chromadb` et `atlas_searxng`. Le service `ollama` est derrière le profil `docker-ollama` et **ne démarre pas** : l'Ollama natif suffit (conflit de port 11434 constaté au sprint A).
+- [ ] Vérification de la persistance : `python scripts\doctor.py` doit afficher `[OK] ChromaDB persiste dans un volume` (`/data` monté sur `atlas_chromadb_data`). Depuis le sprint M-bis, `docker compose down` puis `up -d` conserve la mémoire (vérifié : 535/535 éléments identiques).
+- [ ] **Sauvegarde** avant toute opération Docker touchant ChromaDB (changement d'image, réinitialisation de Docker Desktop, migration) :
   ```powershell
-  docker exec assistant_chromadb sh -c "grep persist_path /config.yaml"   # "/data" = problème présent
-  docker cp assistant_chromadb:/data C:\Atlas_backup\chromadb_$(Get-Date -Format yyyyMMdd)
+  python scripts\backup_memory.py backup
+  python scripts\backup_memory.py verify <dossier affiché par backup>
   ```
-  `python scripts\doctor.py` signale ce problème en CRITIQUE.
+  Destination par défaut : `%USERPROFILE%\Atlas_backups\memoire\`. Copier ensuite ce dossier sur un support externe : le volume vit dans le disque virtuel de WSL et **ne survit pas** à une réinitialisation de Docker Desktop.
+- [ ] ⚠ Postes installés avant le 17/09/2026 (ancien projet `assistant-bureau`, conteneurs `assistant_*`) : la mémoire vivait **dans** le conteneur `assistant_chromadb`. Ne lancer **aucune** commande `docker compose` avec l'ancien fichier, et suivre `docs/rapports/RAPPORT_SPRINT_M_BIS.md` pour migrer (sauvegarde, volume, vérification).
 
 **Option B — natif, sans Docker** (utilisée au sprint A, faute de virtualisation) :
 - [ ] Dans un terminal dédié, venv activé :

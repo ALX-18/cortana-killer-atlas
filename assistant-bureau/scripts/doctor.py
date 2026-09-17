@@ -341,22 +341,25 @@ def check_docker_services(docker: str) -> list[Check]:
     names = set(out.split()) if code == 0 else set()
     # Le service ollama de docker-compose.yml écoute sur [::]:11434 : un client qui résout
     # « localhost » en IPv6 parle alors à ce conteneur et non à l'Ollama natif (constaté).
-    if "assistant_ollama" in names and shutil.which("ollama"):
-        checks.append(Check("Docker", "Pas de second Ollama (conteneur) sur le port 11434", False, WARNING,
-                            "conteneur assistant_ollama actif en plus de l'Ollama natif",
-                            "docker stop assistant_ollama ; démarrer uniquement : docker compose up -d chromadb searxng"))
-    if "assistant_chromadb" in names:
-        # docker-compose monte data/chromadb sur /chroma/chroma, mais l'image persiste dans /data :
-        # la mémoire vit alors dans la couche du conteneur et disparaît avec lui.
-        code, out = _run([docker, "exec", "assistant_chromadb", "sh", "-c",
-                          "grep -h persist_path /config.yaml 2>/dev/null; ls /chroma/chroma | wc -l"], timeout=15)
-        lines = out.strip().splitlines()
-        persist = next((l.split(":", 1)[1].strip().strip('"') for l in lines if "persist_path" in l), "")
-        mounted_ok = persist.startswith("/chroma/chroma") or not persist
-        checks.append(Check("Mémoire", "ChromaDB persiste dans le volume monté", mounted_ok, CRITICAL,
-                            f"persist_path={persist or '?'} ; volume monté sur /chroma/chroma",
-                            "NE PAS supprimer le conteneur assistant_chromadb (la mémoire est dans sa couche). "
-                            "Sauvegarder d'abord : docker cp assistant_chromadb:/data <dossier>, puis corriger le montage (sprint B)."))
+    for ollama in ("atlas_ollama", "assistant_ollama"):
+        if ollama in names and shutil.which("ollama"):
+            checks.append(Check("Docker", "Pas de second Ollama (conteneur) sur le port 11434", False, WARNING,
+                                f"conteneur {ollama} actif en plus de l'Ollama natif",
+                                f"docker stop {ollama} ; le service est derrière le profil docker-ollama (docker compose up -d suffit)"))
+    chroma = next((c for c in ("atlas_chromadb", "assistant_chromadb") if c in names), None)
+    if chroma:
+        # L'image persiste dans persist_path (/data) : ce chemin doit être un volume ou un montage,
+        # sinon la mémoire vit dans la couche du conteneur et disparaît avec lui (risque L21).
+        code, out = _run([docker, "exec", chroma, "sh", "-c", "grep -h persist_path /config.yaml 2>/dev/null"], timeout=15)
+        persist = next((l.split(":", 1)[1].strip().strip('"') for l in out.splitlines() if "persist_path" in l), "")
+        code, mounts = _run([docker, "inspect", chroma, "--format",
+                             "{{range .Mounts}}{{.Destination}}={{.Type}}:{{.Name}}{{.Source}};{{end}}"], timeout=15)
+        mounted = dict(m.split("=", 1) for m in mounts.strip().split(";") if "=" in m)
+        mounted_ok = bool(persist) and persist in mounted
+        checks.append(Check("Mémoire", "ChromaDB persiste dans un volume", mounted_ok, CRITICAL,
+                            f"{chroma} : persist_path={persist or '?'} ; montages={mounted or 'aucun'}",
+                            f"NE PAS supprimer {chroma} (la mémoire est dans sa couche). Sauvegarder d'abord : "
+                            "python scripts/backup_memory.py backup, puis monter un volume sur persist_path."))
     return checks
 
 

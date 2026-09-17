@@ -1,29 +1,20 @@
-version: "3.8"
+# Projet compose « atlas » (sprint M-bis, 17/09/2026).
+# L'ancien projet implicite « assistant-bureau » (conteneurs assistant_*) n'est plus utilisé.
+# Démarrage : docker compose up -d   (ChromaDB + SearXNG ; Ollama reste natif)
+name: atlas
 
 services:
-  ollama:
-    image: ollama/ollama
-    container_name: assistant_ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
   chromadb:
-    image: chromadb/chroma
-    container_name: assistant_chromadb
+    # Image épinglée par digest (chroma 1.4.1). Ne pas repasser à :latest sans migration vérifiée
+    # (scripts/backup_memory.py backup + verify).
+    image: chromadb/chroma@sha256:7605e7b398f96dba833ed1b6272f815b9d33414dde45c68bd246e84447db8591
+    pull_policy: never
+    container_name: atlas_chromadb
     ports:
       - "8001:8000"
     volumes:
-      - ./data/chromadb:/chroma/chroma
+      # L'image persiste dans /data (persist_path) : le volume doit être monté là (risque L21).
+      - atlas_chromadb_data:/data
     environment:
       - ANONYMIZED_TELEMETRY=FALSE
       - ALLOW_RESET=TRUE
@@ -40,5 +31,29 @@ services:
       - SEARXNG_SECRET_KEY=atlas_secret_key_change_me
     restart: unless-stopped
 
+  # Ollama tourne en natif. Ce service entrait en conflit sur le port 11434 (risque L22) :
+  # il ne démarre plus que sur demande explicite : docker compose --profile docker-ollama up -d
+  ollama:
+    profiles: ["docker-ollama"]
+    image: ollama/ollama
+    container_name: atlas_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
 volumes:
+  # Créé hors compose (sprint M-bis) : ni `docker compose down` ni `down -v` ne peuvent le supprimer.
+  atlas_chromadb_data:
+    external: true
+  # Volume existant de l'ancien projet (contient mistral), réutilisé tel quel.
   ollama_data:
+    name: assistant-bureau_ollama_data
