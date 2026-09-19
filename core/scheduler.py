@@ -41,13 +41,23 @@ class ScheduledJob:
     created_at: str = ""
     last_run: Optional[str] = None
     next_run: Optional[str] = None
+    # B1-ter : motif de désactivation, calculé au chargement ; jamais écrit dans le fichier.
+    invalid_reason: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
 
+    def to_storage_dict(self) -> dict:
+        d = asdict(self)
+        d.pop("invalid_reason", None)
+        return d
+
     @classmethod
     def from_dict(cls, d: dict) -> "ScheduledJob":
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k != "invalid_reason"})
+
+
+_SOURCE = "tâche planifiée"
 
 
 # --------------------------------------------------------------------------- #
@@ -61,12 +71,31 @@ class AtlasScheduler:
         self._scheduler = AsyncIOScheduler()
         self._jobs: dict[str, ScheduledJob] = {}
         self._execution_callback = None
+        # B1-ter : ce qui a été lu mais ne peut pas être exécuté est CONSERVÉ tel quel.
+        self._raw_entries: dict[str, dict] = {}    # id → entrée d'origine, telle que lue
+        self._unparsed_entries: list = []          # entrées illisibles, réécrites à l'identique
+        self._storage_error: Optional[str] = None  # fichier illisible : aucune écriture
+
+    def _validate(self, job: ScheduledJob) -> str:
+        from core.validator import check_automation_actions
+        from core.workflow_engine import get_workflow_engine
+        return check_automation_actions(job.actions, get_workflow_engine().steps_for_validation)
+
+    def _block(self, job: ScheduledJob, reason: str) -> dict:
+        from core.validator import report_automation_block
+        job.invalid_reason = reason
+        report_automation_block(_SOURCE, job.name, reason)
+        return {"success": False, "status": "blocked",
+                "message": f"Tâche '{job.name}' désactivée : {reason}."}
 
     async def start(self):
         """Démarre le scheduler et charge les jobs persistés."""
         self._load_jobs()
         for job in self._jobs.values():
-            if job.enabled:
+            reason = self._validate(job)
+            if reason:
+                self._block(job, reason)
+            elif job.enabled:
                 self._register_apscheduler_job(job)
         self._scheduler.start()
         logger.info("⏰ Scheduler démarré — %d job(s) chargé(s)", len(self._jobs))
@@ -86,7 +115,17 @@ class AtlasScheduler:
         self._execution_callback = callback
 
     async def add_job(self, job: ScheduledJob) -> str:
-        """Ajoute un job planifié. Retourne l'ID."""
+        """Ajoute un job planifié. Retourne l'ID.
+
+        B1-ter : ValueError si une action n'est pas autorisée, ou si le fichier existant est
+        illisible (l'écraser ferait perdre les tâches de l'utilisateur).
+        """
+        if self._storage_error:
+            raise ValueError(f"Tâche '{job.name}' non enregistrée : {self._storage_error}")
+        reason = self._validate(job)
+        if reason:
+            logger.warning("Tâche planifiée refusée à la création '%s' : %s", job.name, reason)
+            raise ValueError(f"Tâche '{job.name}' refusée : {reason}")
         if not job.id:
             job.id = str(uuid.uuid4())[:8]
         if not job.created_at:
@@ -131,6 +170,9 @@ class AtlasScheduler:
         job = self._jobs.get(job_id)
         if not job:
             return {"success": False, "message": f"Job '{job_id}' introuvable."}
+        reason = job.invalid_reason or self._validate(job)
+        if reason:
+            return self._block(job, reason)
 
         results = await self._execute_job_actions(job)
         job.last_run = datetime.now().isoformat()
@@ -184,6 +226,10 @@ class AtlasScheduler:
         if not job:
             return
         logger.info("⏰ Job déclenché : %s (%s)", job.name, job.id)
+        reason = job.invalid_reason or self._validate(job)
+        if reason:
+            self._block(job, reason)
+            return
         await self._execute_job_actions(job)
         job.last_run = datetime.now().isoformat()
         self._save_jobs()
@@ -204,24 +250,55 @@ class AtlasScheduler:
         return results
 
     def _load_jobs(self):
-        """Charge les jobs depuis le fichier JSON."""
+        """Charge les jobs depuis le fichier JSON.
+
+        B1-ter : entrée par entrée. Avant, une seule entrée illisible vidait toute la liste,
+        et le prochain enregistrement écrasait le fichier : les tâches étaient perdues.
+        """
+        from core.validator import report_automation_block
+
+        self._jobs, self._raw_entries, self._unparsed_entries = {}, {}, []
+        self._storage_error = None
         if not SCHEDULES_FILE.exists():
-            self._jobs = {}
             return
         try:
             with open(SCHEDULES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._jobs = {j["id"]: ScheduledJob.from_dict(j) for j in data}
-            logger.info("📂 %d job(s) chargé(s) depuis schedules.json", len(self._jobs))
+            if not isinstance(data, list):
+                raise ValueError("une liste de tâches est attendue")
         except Exception as e:
-            logger.error("Erreur chargement schedules.json : %s", e)
-            self._jobs = {}
+            self._storage_error = f"schedules.json illisible ({e}), fichier laissé intact"
+            report_automation_block(_SOURCE, "schedules.json", self._storage_error)
+            return
+        for entry in data:
+            try:
+                job = ScheduledJob.from_dict(entry)
+                if not isinstance(job.id, str) or not job.id or job.id in self._jobs:
+                    raise ValueError("identifiant absent ou en double")
+            except Exception as e:
+                self._unparsed_entries.append(entry)
+                label = entry.get("name", "?") if isinstance(entry, dict) else "?"
+                report_automation_block(_SOURCE, str(label), f"entrée illisible ({e}), conservée telle quelle")
+                continue
+            self._jobs[job.id] = job
+            self._raw_entries[job.id] = entry
+        logger.info("📂 %d job(s) chargé(s) depuis schedules.json", len(self._jobs))
 
     def _save_jobs(self):
-        """Persiste les jobs dans le fichier JSON."""
+        """Persiste les jobs dans le fichier JSON.
+
+        B1-ter : une tâche désactivée est réécrite exactement comme elle a été lue, et les
+        entrées illisibles sont conservées. Fichier illisible : aucune écriture.
+        """
+        if self._storage_error:
+            logger.error("schedules.json non réécrit : %s", self._storage_error)
+            return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         try:
-            data = [j.to_dict() for j in self._jobs.values()]
+            data = [
+                self._raw_entries[j.id] if j.invalid_reason and j.id in self._raw_entries else j.to_storage_dict()
+                for j in self._jobs.values()
+            ] + self._unparsed_entries
             with open(SCHEDULES_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:

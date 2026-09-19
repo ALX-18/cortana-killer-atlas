@@ -53,17 +53,29 @@ class ContextTrigger:
     enabled: bool = True
     trigger_count: int = 0
     last_triggered: Optional[str] = None
+    # B1-ter : motif de désactivation, calculé au chargement ; jamais écrit dans le fichier.
+    invalid_reason: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
         return d
 
+    def to_storage_dict(self) -> dict:
+        d = asdict(self)
+        d.pop("invalid_reason", None)
+        return d
+
     @classmethod
     def from_dict(cls, d: dict) -> "ContextTrigger":
+        d = dict(d)  # B1-ter : ne pas altérer l'entrée lue, elle peut être réécrite telle quelle
         cond = d.pop("condition", {})
         if isinstance(cond, dict):
             cond = TriggerCondition.from_dict(cond)
-        return cls(condition=cond, **{k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k != "condition"})
+        return cls(condition=cond, **{k: v for k, v in d.items()
+                                      if k in cls.__dataclass_fields__ and k not in ("condition", "invalid_reason")})
+
+
+_SOURCE = "déclencheur"
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +108,20 @@ class TriggerEngine:
         self._execution_callback = None
         self._context_callback = None
         self._protection_callback = None
+        # B1-ter : ce qui a été lu mais ne peut pas être exécuté est CONSERVÉ tel quel.
+        self._raw_entries: dict[str, dict] = {}
+        self._unparsed_entries: list = []
+        self._storage_error: Optional[str] = None
+
+    def _validate(self, trigger: ContextTrigger) -> str:
+        from core.validator import check_automation_actions
+        from core.workflow_engine import get_workflow_engine
+        return check_automation_actions(trigger.actions, get_workflow_engine().steps_for_validation)
+
+    def _block(self, trigger: ContextTrigger, reason: str) -> None:
+        from core.validator import report_automation_block
+        trigger.invalid_reason = reason
+        report_automation_block(_SOURCE, trigger.name, reason)
 
     async def start(self):
         """Démarre la boucle de surveillance."""
@@ -132,7 +158,17 @@ class TriggerEngine:
         self._check_interval = max(5, seconds)
 
     async def add_trigger(self, trigger: ContextTrigger) -> str:
-        """Ajoute un trigger. Retourne l'ID."""
+        """Ajoute un trigger. Retourne l'ID.
+
+        B1-ter : ValueError si une action n'est pas autorisée, ou si le fichier existant est
+        illisible (l'écraser ferait perdre les déclencheurs de l'utilisateur).
+        """
+        if self._storage_error:
+            raise ValueError(f"Déclencheur '{trigger.name}' non enregistré : {self._storage_error}")
+        reason = self._validate(trigger)
+        if reason:
+            logger.warning("Déclencheur refusé à la création '%s' : %s", trigger.name, reason)
+            raise ValueError(f"Déclencheur '{trigger.name}' refusé : {reason}")
         # Enforce limits
         active_count = sum(1 for t in self._triggers.values() if t.enabled)
         if active_count >= MAX_ACTIVE_TRIGGERS:
@@ -194,8 +230,8 @@ class TriggerEngine:
         now = time.monotonic()
 
         for trigger_id, trigger in list(self._triggers.items()):
-            if not trigger.enabled:
-                continue
+            if not trigger.enabled or trigger.invalid_reason:
+                continue  # désactivé au chargement : déjà signalé, jamais évalué
 
             # Check cooldown
             if trigger.last_triggered:
@@ -265,6 +301,12 @@ class TriggerEngine:
         """Déclenche un trigger — exécute ses actions."""
         logger.info("🔔 Trigger déclenché : %s (%s)", trigger.name, trigger.id)
 
+        # B1-ter : contrôle à l'exécution — le contenu a pu changer depuis le chargement.
+        reason = self._validate(trigger)
+        if reason:
+            self._block(trigger, reason)
+            return
+
         # Check protection on target processes
         for action in trigger.actions:
             target = action.get("params", {}).get("name", "") or action.get("params", {}).get("targets", [])
@@ -293,24 +335,54 @@ class TriggerEngine:
     # ----- Persistence ----- #
 
     def _load_triggers(self):
-        """Charge les triggers depuis le fichier JSON."""
+        """Charge les triggers depuis le fichier JSON, entrée par entrée (B1-ter).
+
+        Un déclencheur dont une action n'est pas autorisée est désactivé et signalé ; une
+        entrée illisible est signalée et conservée ; un fichier illisible n'est jamais écrasé.
+        """
+        from core.validator import report_automation_block
+
+        self._triggers, self._raw_entries, self._unparsed_entries = {}, {}, []
+        self._storage_error = None
         if not TRIGGERS_FILE.exists():
-            self._triggers = {}
             return
         try:
             with open(TRIGGERS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._triggers = {t["id"]: ContextTrigger.from_dict(t) for t in data}
-            logger.info("📂 %d trigger(s) chargé(s) depuis triggers.json", len(self._triggers))
+            if not isinstance(data, list):
+                raise ValueError("une liste de déclencheurs est attendue")
         except Exception as e:
-            logger.error("Erreur chargement triggers.json : %s", e)
-            self._triggers = {}
+            self._storage_error = f"triggers.json illisible ({e}), fichier laissé intact"
+            report_automation_block(_SOURCE, "triggers.json", self._storage_error)
+            return
+        for entry in data:
+            try:
+                trigger = ContextTrigger.from_dict(entry)
+                if not isinstance(trigger.id, str) or not trigger.id or trigger.id in self._triggers:
+                    raise ValueError("identifiant absent ou en double")
+            except Exception as e:
+                self._unparsed_entries.append(entry)
+                label = entry.get("name", "?") if isinstance(entry, dict) else "?"
+                report_automation_block(_SOURCE, str(label), f"entrée illisible ({e}), conservée telle quelle")
+                continue
+            self._triggers[trigger.id] = trigger
+            self._raw_entries[trigger.id] = entry
+            reason = self._validate(trigger)
+            if reason:
+                self._block(trigger, reason)
+        logger.info("📂 %d trigger(s) chargé(s) depuis triggers.json", len(self._triggers))
 
     def _save_triggers(self):
-        """Persiste les triggers dans le fichier JSON."""
+        """Persiste les triggers dans le fichier JSON (déclencheurs désactivés : tels que lus)."""
+        if self._storage_error:
+            logger.error("triggers.json non réécrit : %s", self._storage_error)
+            return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         try:
-            data = [t.to_dict() for t in self._triggers.values()]
+            data = [
+                self._raw_entries[t.id] if t.invalid_reason and t.id in self._raw_entries else t.to_storage_dict()
+                for t in self._triggers.values()
+            ] + self._unparsed_entries
             with open(TRIGGERS_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:

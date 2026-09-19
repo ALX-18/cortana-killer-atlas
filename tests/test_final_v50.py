@@ -242,7 +242,11 @@ def test_09_web_search_total_degraded_message(monkeypatch):
     assert "La recherche est indisponible" in results[0]["snippet"]
 
 
-def test_10_workflow_mode_gaming_criteria_success(monkeypatch):
+def test_10_workflow_criteria_success(monkeypatch):
+    """B1-ter : ce test vérifiait les critères de mode_gaming en simulant la réussite de
+    kill_process et system_config, deux étapes qui ne s'exécutent jamais en réel (confirmation
+    impossible). mode_gaming est désormais refusé ; les critères sont vérifiés sur
+    demarrage_matin, entièrement autorisé."""
     from core.workflow_engine import get_workflow_engine
 
     engine = get_workflow_engine()
@@ -258,7 +262,10 @@ def test_10_workflow_mode_gaming_criteria_success(monkeypatch):
     engine.set_notification_callback(_notify)
     engine.set_protection_callback(lambda *_: "libre")
 
-    result = asyncio.run(engine.run_workflow("mode_gaming"))
+    result = asyncio.run(engine.run_workflow("demarrage_matin"))
     assert result["success"] is True
     assert result["criteria"]["success"] is True
-    assert result["criteria"]["checks"]["steam_lance"] is True
+    assert result["criteria"]["checks"]["apps_favorites_lancees"] is True
+
+    refused = asyncio.run(engine.run_workflow("mode_gaming"))
+    assert refused["success"] is False
