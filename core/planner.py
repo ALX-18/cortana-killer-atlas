@@ -16,6 +16,7 @@ logger = logging.getLogger("atlas.planner")
 
 # Étapes qui déterminent l'application de travail pour les étapes suivantes (B1 / L24).
 _APP_TARGET_ACTIONS = {"open", "launch", "focus", "maximize", "minimize"}
+_KEYBOARD_ACTIONS = {"type", "hotkey"}
 
 
 @dataclass
@@ -172,6 +173,13 @@ class Planner:
             if step.action == "click" and not params.get("app_title") and current_app:
                 params["app_title"] = current_app
                 logger.info("[PLANNER] Étape 'click' rattachée à l'application '%s'", current_app)
+            # B1-bis : même règle pour la frappe. Le prompt place la fenêtre dans step.target,
+            # que le validateur ne lit pas pour une frappe : on la porte dans params["target"].
+            if step.action in _KEYBOARD_ACTIONS and not params.get("target"):
+                window = step.target or current_app
+                if window:
+                    params["target"] = window
+                    logger.info("[PLANNER] Étape '%s' rattachée à la fenêtre '%s'", step.action, window)
 
             intent = IntentResult(
                 category=self._verb_to_category(step.action),
@@ -196,6 +204,8 @@ class Planner:
                 current_app = step.target
             elif params.get("app_title"):
                 current_app = params["app_title"]
+            elif step.action in _KEYBOARD_ACTIONS and params.get("target"):
+                current_app = params["target"]
 
         return plan
 

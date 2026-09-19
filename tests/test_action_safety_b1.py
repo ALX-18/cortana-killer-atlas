@@ -66,8 +66,14 @@ def test_l5_hotkey_avec_chaine_arbitraire_est_rejete():
 
 @pytest.mark.parametrize("keys", ["ctrl+s", ["ctrl", "s"], "CTRL+SHIFT+n", ["alt", "f4"], "win", ["f5"]])
 def test_l5_hotkeys_valides_acceptees(keys):
-    """Les vraies combinaisons restent acceptées, et les touches sont normalisées en liste."""
-    resolved = get_validator().resolve(_intent("interaction", "hotkey", params={"keys": keys}), {})
+    """Les vraies combinaisons restent acceptées, et les touches sont normalisées en liste.
+
+    B1-bis : une cible est désormais obligatoire pour tout raccourci ; ce test porte sur les
+    touches, il en fournit donc une.
+    """
+    resolved = get_validator().resolve(
+        _intent("interaction", "hotkey", params={"keys": keys, "target": "bloc-notes"}), {},
+    )
     assert resolved.rejected is False
     assert resolved.tool == "window_hotkey"
     assert isinstance(resolved.params["keys"], list)
