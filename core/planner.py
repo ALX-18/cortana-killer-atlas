@@ -14,6 +14,10 @@ from core.validator import ResolvedAction, VerificationRule, get_validator
 
 logger = logging.getLogger("atlas.planner")
 
+# Étapes qui déterminent l'application de travail pour les étapes suivantes (B1 / L24).
+_APP_TARGET_ACTIONS = {"open", "launch", "focus", "maximize", "minimize"}
+_KEYBOARD_ACTIONS = {"type", "hotkey"}
+
 
 @dataclass
 class PlanStep:
@@ -148,23 +152,60 @@ class Planner:
         )
 
     def _validate_plan(self, plan: ExecutionPlan, context: dict) -> ExecutionPlan:
-        """Valide chaque étape du plan via le Validator."""
+        """Valide chaque étape du plan via le Validator.
+
+        B1 / L24 : les étapes sont toutes résolues AVANT la première exécution. Une étape
+        « clique sur X » ne voit donc pas l'application ouverte par l'étape précédente, et
+        se rabattait sur la fenêtre au premier plan — au sprint A, une conversation Discord
+        (C05). L'application des étapes précédentes est désormais transmise explicitement.
+
+        B1 / L5 : si le validateur refuse une étape, tout le plan est abandonné. Un plan qui
+        contient un paramètre absurde n'est pas un plan de confiance ; exécuter ses autres
+        étapes reviendrait à agir à moitié sur la foi d'une sortie LLM déjà démentie.
+        """
         from core.intent_classifier import IntentResult
 
         validator = get_validator()
+        current_app = ""
 
         for step in plan.steps:
-            # Create a synthetic IntentResult for validation
+            params = dict(step.params or {})
+            if step.action == "click" and not params.get("app_title") and current_app:
+                params["app_title"] = current_app
+                logger.info("[PLANNER] Étape 'click' rattachée à l'application '%s'", current_app)
+            # B1-bis : même règle pour la frappe. Le prompt place la fenêtre dans step.target,
+            # que le validateur ne lit pas pour une frappe : on la porte dans params["target"].
+            if step.action in _KEYBOARD_ACTIONS and not params.get("target"):
+                window = step.target or current_app
+                if window:
+                    params["target"] = window
+                    logger.info("[PLANNER] Étape '%s' rattachée à la fenêtre '%s'", step.action, window)
+
             intent = IntentResult(
                 category=self._verb_to_category(step.action),
                 verb=step.action,
                 target=step.target,
-                params=step.params,
+                params=params,
                 confidence=0.9,
                 raw_input="",
             )
             resolved = validator.resolve(intent, context)
             step.resolved = resolved
+
+            if resolved.rejected:
+                logger.warning(
+                    "[PLANNER] Plan abandonné : étape '%s' refusée (%s)",
+                    step.action, resolved.rejection_reason,
+                )
+                step.params = params
+                return ExecutionPlan(goal=plan.goal, steps=[step], fallback=plan.fallback)
+
+            if step.action in _APP_TARGET_ACTIONS and step.target:
+                current_app = step.target
+            elif params.get("app_title"):
+                current_app = params["app_title"]
+            elif step.action in _KEYBOARD_ACTIONS and params.get("target"):
+                current_app = params["target"]
 
         return plan
 

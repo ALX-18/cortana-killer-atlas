@@ -278,6 +278,13 @@ class TestGroundingTimeoutEnforced:
         monkeypatch.setattr(grounding, "_try_vision", self._named("_try_vision", _fail))
 
         # Force win32 path so UIA is the first layer
+        # B1 : find_and_click exige désormais une fenêtre existante pour la cible.
+        monkeypatch.setattr(grounding, "_find_candidate_windows", lambda t: ["fenêtre simulée"])
+
+        async def _no_easyocr(app, elem):
+            return None
+        _no_easyocr.__name__ = "_try_easyocr"
+        monkeypatch.setattr(grounding, "_try_easyocr", _no_easyocr)
         monkeypatch.setattr(grounding, "_detect_app_type", lambda t: "win32")
         monkeypatch.setattr(grounding, "_has_local_minicpm", lambda: True)
 
@@ -314,6 +321,12 @@ class TestGroundingTimeoutEnforced:
         monkeypatch.setattr(grounding, "_try_cache", self._named("_try_cache", _fail_cache))
         monkeypatch.setattr(grounding, "_try_ocr", self._named("_try_ocr", _fail_ocr))
         monkeypatch.setattr(grounding, "_try_vision", self._named("_try_vision", _fail_vision))
+        monkeypatch.setattr(grounding, "_find_candidate_windows", lambda t: ["fenêtre simulée"])
+
+        async def _no_easyocr(app, elem):
+            return None
+        _no_easyocr.__name__ = "_try_easyocr"
+        monkeypatch.setattr(grounding, "_try_easyocr", _no_easyocr)
         monkeypatch.setattr(grounding, "_detect_app_type", lambda t: "win32")
         monkeypatch.setattr(grounding, "_has_local_minicpm", lambda: True)
         # v5.3: vision is OFF by default; force it ON to exercise the full 4-layer stack
@@ -350,6 +363,12 @@ class TestGroundingTimeoutEnforced:
         monkeypatch.setattr(grounding, "_try_cache", self._named("_try_cache", _fail_cache))
         monkeypatch.setattr(grounding, "_try_ocr", self._named("_try_ocr", _ok_ocr))
         monkeypatch.setattr(grounding, "_try_vision", self._named("_try_vision", _fail_vision))
+        monkeypatch.setattr(grounding, "_find_candidate_windows", lambda t: ["fenêtre simulée"])
+
+        async def _no_easyocr(app, elem):
+            return None
+        _no_easyocr.__name__ = "_try_easyocr"
+        monkeypatch.setattr(grounding, "_try_easyocr", _no_easyocr)
         monkeypatch.setattr(grounding, "_detect_app_type", lambda t: "win32")
         monkeypatch.setattr(grounding, "_has_local_minicpm", lambda: True)
 

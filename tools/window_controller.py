@@ -9,6 +9,7 @@ Utilise PyAutoGUI + Win32 API pour :
 
 import logging
 import time
+import unicodedata
 from typing import Any
 
 import pyautogui
@@ -96,6 +97,94 @@ def _enum_windows_by_title(title_fragment: str) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+#  B1-bis — contrôles des paramètres d'action
+#
+#  Fonctions pures, sans effet : le validateur les applique avant exécution, et chaque
+#  outil les réapplique, parce que le planificateur horaire, les déclencheurs et les
+#  workflows appellent les outils sans passer par le validateur (main._execute_action).
+#  Chaque fonction retourne un message d'erreur, vide si le paramètre est acceptable.
+# --------------------------------------------------------------------------- #
+
+# Texte à frapper : au-delà, la frappe caractère par caractère dure plusieurs dizaines de
+# secondes, pendant lesquelles le premier plan peut changer.
+MAX_TYPE_TEXT_CHARS = 2000
+# Seuls contrôles admis : saut de ligne et tabulation, qui ont un sens dans un texte.
+_ALLOWED_TEXT_CONTROLS = {"\n", "\t"}
+
+VALID_SNAP_POSITIONS = ("left", "right", "top-left", "top-right", "bottom-left", "bottom-right")
+
+_VALID_MOUSE_BUTTONS = {"left", "right", "middle"}
+_MAX_CLICKS = 3
+
+
+def check_type_text(text) -> tuple[str, str]:
+    """Contrôle le texte à frapper. Retourne (texte normalisé, erreur).
+
+    pyautogui.typewrite interprète une LISTE comme des noms de touches (["win", "r"]
+    ouvre la boîte Exécuter) : seule une chaîne est acceptée. Les caractères de contrôle
+    autres que saut de ligne et tabulation (échappement, retour arrière, NUL…) sont refusés.
+    """
+    if not isinstance(text, str):
+        return "", f"texte de type {type(text).__name__}, attendu une chaîne"
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not text:
+        return "", "texte vide"
+    if len(text) > MAX_TYPE_TEXT_CHARS:
+        return "", f"texte de {len(text)} caractères, maximum {MAX_TYPE_TEXT_CHARS}"
+    for ch in text:
+        if unicodedata.category(ch) == "Cc" and ch not in _ALLOWED_TEXT_CONTROLS:
+            return "", f"caractère de contrôle U+{ord(ch):04X} dans le texte"
+    return text, ""
+
+
+def check_window_title(title) -> tuple[str, str]:
+    """Titre de fenêtre non vide. getWindowsWithTitle("") renvoie TOUTES les fenêtres."""
+    if not isinstance(title, str) or not title.strip():
+        return "", "titre de fenêtre vide ou absent"
+    return title.strip(), ""
+
+
+def _monitor_rects() -> list[tuple[int, int, int, int]]:
+    """Rectangles (gauche, haut, droite, bas) de chaque écran, en coordonnées virtuelles.
+
+    Un écran secondaire placé à gauche du principal a des coordonnées négatives.
+    """
+    if HAS_WIN32:
+        try:
+            import win32api
+            return [tuple(rect) for _, _, rect in win32api.EnumDisplayMonitors()]
+        except Exception as e:
+            logger.debug("EnumDisplayMonitors indisponible : %s", e)
+    width, height = pyautogui.size()
+    return [(0, 0, width, height)]
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def check_click_params(x, y, button="left", clicks=1) -> str:
+    """Coordonnées entières, sur un écran existant ; bouton et nombre de clics bornés.
+
+    x et y sont obligatoires : sans eux, pyautogui clique là où se trouve la souris.
+    """
+    if not (_is_int(x) and _is_int(y)):
+        return f"coordonnées de clic invalides (x={x!r}, y={y!r}), deux entiers attendus"
+    if not any(left <= x < right and top <= y < bottom for left, top, right, bottom in _monitor_rects()):
+        return f"point ({x}, {y}) hors de tout écran"
+    if button not in _VALID_MOUSE_BUTTONS:
+        return f"bouton de souris inconnu : {button!r}"
+    if not _is_int(clicks) or not 1 <= clicks <= _MAX_CLICKS:
+        return f"nombre de clics invalide : {clicks!r} (1 à {_MAX_CLICKS})"
+    return ""
+
+
+def _refused(message: str) -> dict[str, Any]:
+    logger.warning("[WINDOW] Action refusée : %s", message)
+    return {"success": False, "message": f"Action refusée : {message}."}
+
+
+# --------------------------------------------------------------------------- #
 #  Classe principale
 # --------------------------------------------------------------------------- #
 
@@ -143,6 +232,10 @@ class WindowController:
         Met au premier plan la fenêtre correspondant au titre.
         Gère les cas minimisés et les restrictions Win32.
         """
+        # B1-bis : titre vide → pywinauto chercherait « .*.* » et pygetwindow « » : toute fenêtre.
+        title, error = check_window_title(title)
+        if error:
+            return _refused(error)
         retries = [0.2, 0.5, 1.0]
         for attempt, delay in enumerate(retries, start=1):
             for alias in _resolve_aliases(title):
@@ -360,29 +453,62 @@ def window_focus(title: str) -> dict[str, Any]:
     return _controller.focus_window(title)
 
 
+def _focus_and_verify(target: str):
+    """Met la cible au premier plan PUIS vérifie qu'elle y est. Retourne (fenêtre active, refus).
+
+    focus_window peut « réussir » sans que Windows cède le premier plan (protection contre
+    le vol de focus d'un processus en arrière-plan) : la frappe partirait alors dans la
+    fenêtre qui s'y trouvait. On lit donc la fenêtre réellement active avant d'agir.
+    """
+    focus_result = _controller.focus_window(target)
+    if not focus_result["success"]:
+        return None, focus_result
+    time.sleep(0.3)
+    try:
+        active = gw.getActiveWindow()
+    except Exception as e:
+        logger.debug("getActiveWindow a échoué : %s", e)
+        active = None
+    active_title = (getattr(active, "title", "") or "") if active else ""
+    if not any(alias.lower() in active_title.lower() for alias in _resolve_aliases(target)):
+        return None, _refused(
+            f"la fenêtre '{target}' n'est pas passée au premier plan "
+            f"(premier plan : '{active_title or '?'}'), aucune action effectuée"
+        )
+    return active, None
+
+
 def window_type(text: str, target: str | None = None, use_clipboard: bool = False) -> dict[str, Any]:
     """
     Tape du texte dans une fenêtre.
-    Si target est spécifié, focalise d'abord la fenêtre.
+
+    B1-bis : la cible est obligatoire et vérifiée au premier plan avant la frappe.
+    Sans elle, le texte partait dans la fenêtre active, quelle qu'elle soit.
     """
-    if target:
-        focus_result = _controller.focus_window(target)
-        if not focus_result["success"]:
-            return focus_result
-        time.sleep(0.3)
+    target, error = check_window_title(target)
+    if error:
+        return _refused("fenêtre cible absente pour la frappe")
+    text, error = check_type_text(text)
+    if error:
+        return _refused(error)
+    _, refusal = _focus_and_verify(target)
+    if refusal:
+        return refusal
     return _controller.type_text(text, use_clipboard=use_clipboard)
 
 
 def window_hotkey(*keys: str, target: str | None = None) -> dict[str, Any]:
     """
     Envoie un raccourci clavier.
-    Si target est spécifié, focalise d'abord la fenêtre.
+
+    B1-bis : la cible est obligatoire et vérifiée au premier plan avant l'envoi.
     """
-    if target:
-        focus_result = _controller.focus_window(target)
-        if not focus_result["success"]:
-            return focus_result
-        time.sleep(0.3)
+    target, error = check_window_title(target)
+    if error:
+        return _refused("fenêtre cible absente pour le raccourci clavier")
+    _, refusal = _focus_and_verify(target)
+    if refusal:
+        return refusal
     return _controller.send_hotkey(*keys)
 
 
@@ -390,14 +516,26 @@ def window_click(x: int | None = None, y: int | None = None,
                  button: str = "left", clicks: int = 1,
                  target: str | None = None) -> dict[str, Any]:
     """
-    Clique dans une fenêtre.
-    Si target est spécifié, focalise d'abord la fenêtre.
+    Clique à des coordonnées d'écran (absolues).
+
+    B1-bis : le point doit tomber sur un écran existant (les coordonnées négatives d'un
+    écran secondaire placé à gauche sont légitimes) et, si une fenêtre cible est nommée,
+    dans le rectangle de cette fenêtre une fois au premier plan.
     """
+    error = check_click_params(x, y, button, clicks)
+    if error:
+        return _refused(error)
     if target:
-        focus_result = _controller.focus_window(target)
-        if not focus_result["success"]:
-            return focus_result
-        time.sleep(0.3)
+        active, refusal = _focus_and_verify(target)
+        if refusal:
+            return refusal
+        left, top = active.left, active.top
+        right, bottom = left + active.width, top + active.height
+        if not (left <= x < right and top <= y < bottom):
+            return _refused(
+                f"point ({x}, {y}) hors de la fenêtre '{active.title}' "
+                f"({left}, {top}) → ({right}, {bottom})"
+            )
     return _controller.click(x, y, button, clicks)
 
 
@@ -413,6 +551,9 @@ def window_get_active() -> dict[str, Any]:
 
 def window_close(title: str) -> dict[str, Any]:
     """Ferme la fenêtre correspondant au titre."""
+    title, error = check_window_title(title)
+    if error:
+        return _refused(error)
     for alias in _resolve_aliases(title):
         try:
             windows = gw.getWindowsWithTitle(alias)
@@ -436,6 +577,9 @@ def window_close(title: str) -> dict[str, Any]:
 
 def window_minimize(title: str) -> dict[str, Any]:
     """Minimise la fenêtre correspondant au titre."""
+    title, error = check_window_title(title)
+    if error:
+        return _refused(error)
     for alias in _resolve_aliases(title):
         try:
             windows = gw.getWindowsWithTitle(alias)
@@ -458,6 +602,9 @@ def window_minimize(title: str) -> dict[str, Any]:
 
 def window_maximize(title: str) -> dict[str, Any]:
     """Maximise la fenêtre correspondant au titre."""
+    title, error = check_window_title(title)
+    if error:
+        return _refused(error)
     for alias in _resolve_aliases(title):
         try:
             windows = gw.getWindowsWithTitle(alias)
@@ -509,6 +656,11 @@ def window_snap(title: str, position: str = "left") -> dict[str, Any]:
     Snap une fenêtre à gauche ou à droite de l'écran.
     position: 'left' | 'right' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
     """
+    title, error = check_window_title(title)
+    if error:
+        return _refused(error)
+    if position not in VALID_SNAP_POSITIONS:
+        return _refused(f"position inconnue : {position!r}, attendu l'une de {list(VALID_SNAP_POSITIONS)}")
     screen_w, screen_h = pyautogui.size()
 
     snap_positions = {

@@ -14,13 +14,58 @@ import asyncio
 import json
 import logging
 import time
+import unicodedata
 import uuid
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import websockets
 from websockets.asyncio.server import Server, ServerConnection
 
 logger = logging.getLogger("atlas.browser_bridge")
+
+
+# --------------------------------------------------------------------------- #
+#  B1-bis — schémas d'URL autorisés
+#
+#  Atlas lit du contenu externe non fiable (recherche web, OCR d'écran). Une URL produite
+#  à partir de ce contenu ne doit jamais ouvrir un fichier local (file:) ni exécuter du
+#  script (javascript:, data:, vbscript:). Liste blanche : seuls les schémas dont l'usage
+#  est avéré pour la navigation dans Atlas. ms-settings: et steam:// sont ceux de
+#  launch_app, pas du navigateur.
+# --------------------------------------------------------------------------- #
+
+ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def check_url(url, allow_empty: bool = False) -> tuple[str, str]:
+    """Contrôle une URL de navigation. Retourne (URL normalisée, erreur).
+
+    Les navigateurs ignorent les espaces et caractères de contrôle en tête et à
+    l'intérieur du schéma (« java	script: », « javascript: ») : ils sont refusés
+    plutôt que nettoyés, pour que le schéma contrôlé soit celui que le navigateur verra.
+    """
+    if url is None and allow_empty:
+        return "", ""
+    if not isinstance(url, str):
+        return "", f"URL de type {type(url).__name__}, attendu une chaîne"
+    url = url.strip()
+    if not url:
+        return ("", "") if allow_empty else ("", "URL vide")
+    for ch in url:
+        if ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf"):
+            return "", f"URL contenant un espace ou un caractère de contrôle (U+{ord(ch):04X})"
+    try:
+        parts = urlsplit(url)
+    except ValueError as e:
+        return "", f"URL illisible ({e})"
+    scheme = parts.scheme.lower()
+    if scheme not in ALLOWED_URL_SCHEMES:
+        shown = f"'{scheme}:'" if scheme else "absent"
+        return "", f"schéma d'URL {shown} non autorisé (autorisés : http, https)"
+    if not parts.hostname:
+        return "", "URL sans nom d'hôte"
+    return url, ""
 
 
 # --------------------------------------------------------------------------- #
@@ -235,8 +280,16 @@ def get_bridge() -> BrowserBridge:
 #  Fonctions publiques (utilisées par intent_engine)
 # --------------------------------------------------------------------------- #
 
+def _url_refused(error: str) -> dict[str, Any]:
+    logger.warning("[BRIDGE] URL refusée : %s", error)
+    return {"success": False, "message": f"Action refusée : {error}."}
+
+
 async def browser_navigate(url: str) -> dict[str, Any]:
     """Navigue vers une URL dans l'onglet actif de l'extension."""
+    url, error = check_url(url)
+    if error:
+        return _url_refused(error)
     bridge = get_bridge()
     if not bridge.is_connected():
         return {"success": False, "message": "Extension navigateur non connectée."}
@@ -244,7 +297,10 @@ async def browser_navigate(url: str) -> dict[str, Any]:
 
 
 async def browser_new_tab(url: str = "") -> dict[str, Any]:
-    """Ouvre un nouvel onglet dans le navigateur connecté."""
+    """Ouvre un nouvel onglet dans le navigateur connecté (vide si url est vide)."""
+    url, error = check_url(url, allow_empty=True)
+    if error:
+        return _url_refused(error)
     bridge = get_bridge()
     if not bridge.is_connected():
         return {"success": False, "message": "Extension navigateur non connectée."}

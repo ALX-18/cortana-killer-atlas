@@ -11,11 +11,27 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from core.intent_classifier import IntentResult, INTENT_CATEGORIES
-from tools.browser_bridge import get_bridge
+from tools.browser_bridge import check_url, get_bridge
+from tools.window_controller import (
+    VALID_SNAP_POSITIONS,
+    check_click_params,
+    check_type_text,
+    check_window_title,
+)
 
 logger = logging.getLogger("atlas.validator")
 
 _IMPLICIT_APP_TTL_S = 120.0  # 2 minutes
+
+# B1-bis : actions qui désignent la fenêtre de travail, et le paramètre qui la nomme.
+_WORKING_WINDOW_PARAM = {
+    "ui_click_element": "app_title",
+    "launch_app": "name",
+    "window_focus": "title",
+    "window_maximize": "title",
+    "window_type": "target",
+    "window_hotkey": "target",
+}
 
 
 def _is_atlas_desktop(title: str) -> bool:
@@ -44,6 +60,30 @@ def _resolve_implicit_app(world_state, context: dict) -> str:
     return app_title
 
 
+def _resolve_working_window(world_state) -> str:
+    """Fenêtre de travail récente pour une frappe sans cible (B1-bis).
+
+    La dernière action RÉUSSIE de moins de 2 minutes qui nommait une fenêtre : clic,
+    lancement, focus, frappe. Jamais la fenêtre au premier plan, ni Atlas Desktop.
+    """
+    if world_state is None:
+        return ""
+    la = world_state.last_action
+    if not isinstance(la, dict):
+        return ""
+    param = _WORKING_WINDOW_PARAM.get(la.get("tool"))
+    if not param:
+        return ""
+    if (la.get("result") or {}).get("status") != "success":
+        return ""
+    if time.time() - getattr(world_state, "last_action_ts", 0.0) > _IMPLICIT_APP_TTL_S:
+        return ""
+    title, error = check_window_title((la.get("params") or {}).get(param))
+    if error or _is_atlas_desktop(title):
+        return ""
+    return title
+
+
 # --------------------------------------------------------------------------- #
 #  Data structures
 # --------------------------------------------------------------------------- #
@@ -64,6 +104,10 @@ class ResolvedAction:
     verification: VerificationRule = field(default_factory=VerificationRule)
     fallback: Optional[str] = None
     intent: Optional[IntentResult] = None
+    # B1 : action refusée par le validateur (paramètre invalide, cible indéterminée).
+    # Rien n'est exécuté ; `tool` porte alors une réponse conversationnelle explicative.
+    rejected: bool = False
+    rejection_reason: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -83,9 +127,79 @@ _BROWSER_PROCESSES = {
 # Destructive actions
 _DESTRUCTIVE_VERBS = {"close", "kill", "shutdown", "restart"}
 
+# --------------------------------------------------------------------------- #
+#  B1 / L5 — touches autorisées pour window_hotkey
+#
+#  Liste blanche, comme le garde-fou docker du sprint B-minimal : on autorise
+#  explicitement, on refuse le reste. Sans elle, le planificateur pouvait produire
+#  window_hotkey {"keys": "Fichier"}, que l'exécuteur décomposait en sept frappes
+#  (F, i, c, h, i, e, r) envoyées à la fenêtre active (rapport A, L5 / C02).
+# --------------------------------------------------------------------------- #
+
+_MODIFIER_KEYS = {"ctrl", "ctrlleft", "ctrlright", "alt", "altleft", "altright",
+                  "shift", "shiftleft", "shiftright", "win", "winleft", "winright", "command", "option"}
+
+_NAMED_KEYS = {
+    "enter", "return", "tab", "esc", "escape", "space", "backspace", "delete", "del", "insert",
+    "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
+    "capslock", "numlock", "scrolllock", "printscreen", "pause", "apps", "menu",
+    "volumeup", "volumedown", "volumemute", "playpause", "nexttrack", "prevtrack",
+}
+_FUNCTION_KEYS = {f"f{i}" for i in range(1, 25)}
+_CHARACTER_KEYS = set("abcdefghijklmnopqrstuvwxyz0123456789") | {
+    "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "`", "+", "*",
+}
+VALID_HOTKEY_KEYS = _MODIFIER_KEYS | _NAMED_KEYS | _FUNCTION_KEYS | _CHARACTER_KEYS
+
+_MAX_HOTKEY_KEYS = 5
+
+
+def normalize_hotkey_keys(raw) -> tuple[list[str], str]:
+    """Normalise des touches en liste minuscule. Retourne (touches, erreur).
+
+    Accepte une liste (["ctrl", "s"]) ou une chaîne de combinaison ("ctrl+s", "ctrl s").
+    Toute touche hors liste blanche invalide l'ensemble : une chaîne comme « Fichier »
+    est du texte, pas un raccourci.
+    """
+    if isinstance(raw, str):
+        parts = [p for p in raw.replace("+", " ").split() if p]
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        return [], f"paramètre 'keys' de type {type(raw).__name__}, attendu une liste ou une chaîne"
+
+    if not parts:
+        return [], "aucune touche fournie"
+    if len(parts) > _MAX_HOTKEY_KEYS:
+        return [], f"{len(parts)} touches, maximum {_MAX_HOTKEY_KEYS}"
+
+    keys = []
+    for part in parts:
+        if not isinstance(part, str):
+            return [], f"touche {part!r} : type {type(part).__name__} au lieu d'une chaîne"
+        key = part.strip().lower()
+        if key not in VALID_HOTKEY_KEYS:
+            return [], f"touche inconnue : {part!r}"
+        keys.append(key)
+    return keys, ""
+
 
 class Validator:
     """Mappe une intention vers un outil exact de façon déterministe."""
+
+    def _reject(self, intent: IntentResult, reason: str, advice: str = "") -> ResolvedAction:
+        """Refuse une action sans rien exécuter, avec un message destiné à l'utilisateur."""
+        logger.warning("[VALIDATOR] Action refusée (%s/%s) : %s", intent.category, intent.verb, reason)
+        message = f"Action refusée : {reason}."
+        if advice:
+            message += f" {advice}"
+        return ResolvedAction(
+            tool="__conversation__",
+            params={"message": message},
+            intent=intent,
+            rejected=True,
+            rejection_reason=reason,
+        )
 
     def resolve(self, intent: IntentResult, context: dict) -> ResolvedAction:
         """
@@ -163,8 +277,15 @@ class Validator:
                     )
 
             elif verb == "close":
+                # B1-bis : titre vide → getWindowsWithTitle("") renvoie toutes les fenêtres et
+                # la première est fermée. La confirmation ne protège pas : elle porterait sur
+                # « fermer une fenêtre » sans dire laquelle.
+                title, error = check_window_title(target or params.get("title"))
+                if error:
+                    return self._reject(intent, "fenêtre à fermer non précisée",
+                                        "Précise la fenêtre, par exemple « ferme le bloc-notes ».")
                 tool_name = "window_close"
-                params = {"title": target} if target else params
+                params = {"title": title}
                 confirmation = True
 
             elif verb in ("minimize", "maximize", "focus"):
@@ -184,18 +305,44 @@ class Validator:
                     except Exception:
                         pass
 
-                # Final fallback: current foreground window title
-                if not params.get("title"):
-                    fg_title = (context.get("foreground_window", {}) or {}).get("title")
-                    if fg_title:
-                        params["title"] = fg_title
+                # B1-bis : plus de repli sur la fenêtre au premier plan (même règle que L24).
+                # Quand l'utilisateur écrit à Atlas, le premier plan est souvent Atlas lui-même.
+                title = params.get("title")
+                if title == "__last_window__":
+                    title = ""
+                title, error = check_window_title(title)
+                if error:
+                    fg_title = (context.get("foreground_window", {}) or {}).get("title", "")
+                    logger.info("[Validator] %s sans fenêtre nommée ; premier plan '%s' NON utilisé",
+                                verb, fg_title or "?")
+                    return self._reject(intent, "fenêtre cible non précisée",
+                                        "Précise la fenêtre, par exemple « réduis le bloc-notes ».")
+                params = {"title": title}
                 verification = VerificationRule(
                     type="window_visible", target=target or "",
                 )
 
+            elif verb == "snap":
+                title, error = check_window_title(target or params.get("title"))
+                if error:
+                    return self._reject(intent, "fenêtre à ancrer non précisée")
+                position = params.get("position", "left")
+                if position not in VALID_SNAP_POSITIONS:
+                    return self._reject(
+                        intent, f"position d'ancrage inconnue : {position!r}",
+                        f"Positions possibles : {', '.join(VALID_SNAP_POSITIONS)}.",
+                    )
+                params = {"title": title, "position": position}
+
         # --- Web specializations ---
         elif category == "web":
             if verb == "navigate" or verb == "open_tab":
+                # B1-bis : schéma d'URL en liste blanche (http, https). Une URL issue d'un
+                # contenu externe ne doit ni ouvrir un fichier local ni exécuter de script.
+                url, error = check_url(params.get("url"), allow_empty=(verb == "open_tab"))
+                if error:
+                    return self._reject(intent, f"adresse web refusée ({error})")
+                params = {**params, "url": url}
                 # If browser bridge connected → use bridge
                 bridge = get_bridge()
                 if bridge.is_connected():
@@ -249,24 +396,80 @@ class Validator:
                     app_title = _resolve_implicit_app(get_world_state(), context)
                     if app_title:
                         logger.info("[Validator] app_title résolu via last_action: '%s'", app_title)
+                # B1 / L24 : plus de repli sur la fenêtre au premier plan. Elle n'a aucun
+                # rapport avec la demande : au sprint A, « clique sur Fichier » a été cherché
+                # dans une conversation Discord active (C05). Sans cible nommée ni contexte
+                # de travail récent, on échoue explicitement.
                 if not app_title:
-                    fg = context.get("foreground_window", {}) or {}
-                    fg_title = fg.get("title", "")
-                    if fg_title and not _is_atlas_desktop(fg_title):
-                        app_title = fg_title
-                        logger.info("[Validator] app_title résolu via foreground: '%s'", app_title)
-                    elif fg_title:
-                        logger.info("[Validator] foreground='%s' ignoré (Atlas Desktop) — app implicite non résolue", fg_title)
+                    fg_title = (context.get("foreground_window", {}) or {}).get("title", "")
+                    logger.info(
+                        "[Validator] aucune application nommée ; premier plan '%s' NON utilisé (L24)",
+                        fg_title or "?",
+                    )
+                    return self._reject(
+                        intent,
+                        "application cible indéterminée pour le clic",
+                        "Précise l'application, par exemple « clique sur Fichier dans le bloc-notes ».",
+                    )
                 params = {
                     "element_name": params.get("element_name", target or ""),
                     "app_title": app_title,
                 }
 
-            elif verb == "type":
-                tool_name = "window_type"
+            elif verb in ("type", "hotkey"):
+                if verb == "type":
+                    # B1-bis : texte contraint (chaîne, pas de caractère de contrôle, longueur bornée).
+                    text, error = check_type_text(params.get("text"))
+                    if error:
+                        return self._reject(intent, f"texte à saisir invalide ({error})")
+                    tool_name = "window_type"
+                    params = {**params, "text": text}
+                else:
+                    # B1 / L5 : les touches viennent du LLM, elles ne sont pas fiables.
+                    keys, error = normalize_hotkey_keys(params.get("keys"))
+                    if error:
+                        return self._reject(
+                            intent,
+                            f"raccourci clavier invalide ({error})",
+                            "Pour saisir du texte, utilise une demande de frappe explicite.",
+                        )
+                    tool_name = "window_hotkey"
+                    params = {**params, "keys": keys}
 
-            elif verb == "hotkey":
-                tool_name = "window_hotkey"
+                # B1-bis : la moitié manquante de L5 — valider OÙ l'on frappe, pas seulement
+                # quoi. Cible nommée, sinon fenêtre de travail récente, sinon refus. Jamais le
+                # premier plan. `intent.target` n'est pas utilisé : pour une frappe issue du
+                # classifieur, c'est le texte lui-même.
+                window, error = check_window_title(params.get("target"))
+                if error:
+                    from core.world_state import get_world_state
+                    window = _resolve_working_window(get_world_state())
+                    if window:
+                        logger.info("[Validator] frappe rattachée à la fenêtre de travail '%s'", window)
+                if not window:
+                    fg_title = (context.get("foreground_window", {}) or {}).get("title", "")
+                    logger.info("[Validator] frappe sans fenêtre nommée ; premier plan '%s' NON utilisé",
+                                fg_title or "?")
+                    return self._reject(
+                        intent,
+                        "fenêtre cible indéterminée pour la saisie",
+                        "Précise l'application, par exemple « écris bonjour dans le bloc-notes ».",
+                    )
+                params["target"] = window
+
+            elif verb == "select":
+                # B1-bis : clic par coordonnées — point sur un écran existant, bouton et nombre
+                # de clics bornés. La fenêtre cible, si nommée, est vérifiée à l'exécution.
+                x, y = params.get("x"), params.get("y")
+                button, clicks = params.get("button", "left"), params.get("clicks", 1)
+                error = check_click_params(x, y, button, clicks)
+                if error:
+                    return self._reject(intent, f"clic refusé ({error})")
+                click_params = {"x": x, "y": y, "button": button, "clicks": clicks}
+                window, error = check_window_title(params.get("target"))
+                if not error:
+                    click_params["target"] = window
+                params = click_params
 
         # --- Process specializations ---
         elif category == "process":

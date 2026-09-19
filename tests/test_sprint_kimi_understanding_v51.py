@@ -87,15 +87,23 @@ def test_focus_phrase_not_misclassified_as_schedule():
     assert "discord" in (r.params.get("title") or "")
 
 
-def test_click_on_element_uses_foreground_title_when_app_missing():
+def test_click_on_element_refuses_foreground_title_when_app_missing():
+    """Sprint B1 / L24 — comportement inversé volontairement.
+
+    Ce test vérifiait que le clic se rabattait sur la fenêtre au premier plan. C'était le
+    défaut L24 : au sprint A, « clique sur Fichier » est parti chercher dans une conversation
+    Discord active (C05). La règle est désormais : application nommée, ou application de
+    l'étape précédente, sinon échec explicite.
+    """
     classifier = get_classifier()
     validator = get_validator()
 
     i = classifier.classify("clique sur Tous", {"foreground_window": {"title": "Amis - Discord"}})
     r = validator.resolve(i, {"foreground_window": {"title": "Amis - Discord"}})
 
-    assert r.tool == "ui_click_element"
-    assert "discord" in (r.params.get("app_title", "")).lower()
+    assert r.rejected is True
+    assert r.tool != "ui_click_element"
+    assert "discord" not in str(r.params).lower()
 
 
 def test_focus_pronoun_marks_last_window_placeholder():
