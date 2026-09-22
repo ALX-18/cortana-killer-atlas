@@ -6,6 +6,7 @@ Gère deux types de mémoire :
   - Long terme  : habitudes, préférences, historique d'actions, corrections (ChromaDB)
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -49,6 +50,11 @@ PARTITIONS = {
 RETRIEVAL_TOP_K: int = int(_cfg.get("retrieval_top_k", 3))
 RETRIEVAL_MIN_SCORE: float = float(_cfg.get("retrieval_min_score", 0.5))
 CONVERSATIONS_MAX: int = int(_cfg.get("conversations", {}).get("max_entries", 10000))
+
+
+def _content_hash(category: str, content: str) -> str:
+    """Empreinte d'un souvenir (D5). Même texte + même catégorie = même souvenir."""
+    return hashlib.sha1(f"{category}\x00{content}".encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------- #
@@ -161,12 +167,21 @@ class MemoryManager:
             logger.warning("Catégorie invalide : '%s'. Valides : %s", category, CATEGORIES)
             return None
 
+        # D5 — déduplication à l'écriture. 219 copies exactes s'étaient accumulées dans
+        # atlas_memory : nettoyer périodiquement ne sert à rien si l'écriture recopie.
+        content_hash = _content_hash(category, content)
+        existing_id = self._find_by_hash(content_hash)
+        if existing_id:
+            logger.debug("Souvenir déjà présent [%s] : %s", category, content[:60])
+            return existing_id
+
         memory_id = f"{category}_{uuid.uuid4().hex[:12]}"
 
         meta = {
             "category": category,
             "timestamp": datetime.now().isoformat(),
             "created_at": time.time(),
+            "content_hash": content_hash,
         }
         if metadata:
             # ChromaDB ne supporte que str/int/float/bool dans les métadonnées
@@ -176,11 +191,26 @@ class MemoryManager:
                 else:
                     meta[k] = str(v)
 
+        # D4 — cause racine : sans embeddings, ChromaDB vectorisait avec son modèle par
+        # défaut (all-MiniLM-L6-v2, anglophone, 384 dimensions) du contenu français, alors
+        # que les partitions utilisent e5 multilingue en 768. Un seul modèle, partout.
+        from core import embeddings as emb
+
+        vecs = emb.embed_passages([content])
+        if vecs is None:
+            logger.error(
+                "Modèle e5 indisponible — souvenir NON sauvegardé [%s] : %s. "
+                "Écrire avec un autre modèle mélangerait deux espaces vectoriels.",
+                category, content[:60],
+            )
+            return None
+
         try:
             self._collection.add(
                 ids=[memory_id],
                 documents=[content],
                 metadatas=[meta],
+                embeddings=vecs,
             )
             logger.info("Souvenir sauvegardé [%s] : %s", category, content[:80])
             return memory_id
@@ -192,25 +222,48 @@ class MemoryManager:
     #  Mémoire long terme — RECALL
     # ------------------------------------------------------------------ #
 
+    def _find_by_hash(self, content_hash: str) -> Optional[str]:
+        """Identifiant d'un souvenir déjà écrit avec cette empreinte, s'il existe (D5)."""
+        try:
+            found = self._collection.get(where={"content_hash": content_hash}, limit=1)
+            ids = found.get("ids") or []
+            return ids[0] if ids else None
+        except Exception as e:
+            logger.debug("Recherche d'empreinte impossible : %s", e)
+            return None
+
     def recall(
         self,
         query: str,
         top_k: int = 5,
         category: Optional[str] = None,
+        min_score: Optional[float] = None,
     ) -> list[dict]:
         """
         Recherche les souvenirs les plus pertinents par rapport à une requête.
 
+        D4 : la requête est vectorisée par e5, comme à l'écriture.
+        D8 : les résultats sous le seuil sont écartés. Sans seuil, ce chemin renvoyait
+        toujours quelque chose — un souvenir à 0,04 de similarité finissait injecté dans
+        le prompt (symptôme C07).
+
         Retourne une liste de dicts : {"id": str, "content": str, "category": str, "score": float}
         """
         if not self._connected:
+            return []
+        from core import embeddings as emb
+
+        threshold = RETRIEVAL_MIN_SCORE if min_score is None else min_score
+        qvec = emb.embed_query(query)
+        if qvec is None:
+            logger.warning("Modèle e5 indisponible — rappel impossible pour : %s", query[:60])
             return []
 
         try:
             where_filter = {"category": category} if category else None
 
             results = self._collection.query(
-                query_texts=[query],
+                query_embeddings=[qvec],
                 n_results=top_k,
                 where=where_filter,
             )
@@ -220,11 +273,14 @@ class MemoryManager:
                 for i, doc in enumerate(results["documents"][0]):
                     meta = results["metadatas"][0][i] if results["metadatas"] else {}
                     distance = results["distances"][0][i] if results["distances"] else 0
+                    score = round(1 - distance, 3)  # cosine → similarity
+                    if score < threshold:
+                        continue
                     memories.append({
                         "id": results["ids"][0][i],
                         "content": doc,
                         "category": meta.get("category", "unknown"),
-                        "score": round(1 - distance, 3),  # cosine → similarity
+                        "score": score,
                         "timestamp": meta.get("timestamp", ""),
                     })
 
