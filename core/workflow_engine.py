@@ -5,6 +5,7 @@ MVP 3.0 : Charge des workflows depuis data/workflows/, permet
 l'exécution séquentielle d'étapes, et la création par conversation.
 """
 
+import contextvars
 import json
 import logging
 import pathlib
@@ -23,6 +24,12 @@ logger = logging.getLogger("atlas.workflow_engine")
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 WORKFLOWS_DIR = DATA_DIR / "workflows"
+
+_SOURCE = "workflow"
+
+# B1-ter / BT4 : workflows en cours d'exécution dans la tâche asyncio courante. Un
+# workflow_run imbriqué passe par execute_tool puis revient ici, dans le même contexte.
+_RUNNING: contextvars.ContextVar[tuple] = contextvars.ContextVar("atlas_running_workflows", default=())
 
 
 # --------------------------------------------------------------------------- #
@@ -64,6 +71,11 @@ class Workflow:
     created_by: str = "user_manual"
     steps: list[WorkflowStep] = field(default_factory=list)
     conditions: list[WorkflowCondition] = field(default_factory=list)
+    # B1-ter : motif de désactivation, calculé au chargement ; jamais écrit dans le fichier.
+    invalid_reason: Optional[str] = None
+
+    def as_actions(self) -> list[dict]:
+        return [{"action": s.action, "params": s.params} for s in self.steps]
 
     def to_yaml_dict(self) -> dict:
         d = {
@@ -118,22 +130,60 @@ class WorkflowEngine:
         self._execution_callback = None
         self._protection_callback = None
         self._notification_callback = None
+        self._loaded = False
 
     def load_workflows(self):
-        """Charge tous les fichiers .yaml du répertoire workflows."""
+        """Charge tous les fichiers .yaml du répertoire workflows.
+
+        B1-ter : deux passes. On lit tout, puis on valide chaque workflow en descendant dans
+        ses workflow_run (cycles, profondeur). Un workflow invalide reste listé, désactivé et
+        signalé ; un fichier illisible est signalé. Aucun fichier n'est jamais réécrit.
+        """
+        from core.validator import report_automation_block
+
         WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
         self._workflows = {}
-        for yaml_file in WORKFLOWS_DIR.glob("*.yaml"):
+        for yaml_file in sorted(WORKFLOWS_DIR.glob("*.yaml")):
             try:
                 with open(yaml_file, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
-                if data and isinstance(data, dict) and "id" in data:
-                    wf = Workflow.from_dict(data)
-                    self._workflows[wf.id] = wf
-                    logger.debug("📋 Workflow chargé : %s (%s)", wf.name, wf.id)
+                if not (data and isinstance(data, dict) and data.get("id")):
+                    raise ValueError("objet YAML avec un champ 'id' attendu")
+                if not isinstance(data.get("steps", []), list):
+                    raise ValueError("'steps' doit être une liste")
+                wf = Workflow.from_dict(data)
             except Exception as e:
-                logger.error("Erreur chargement workflow %s : %s", yaml_file.name, e)
+                report_automation_block(_SOURCE, yaml_file.name, f"fichier illisible ({e}), laissé intact")
+                continue
+            self._workflows[wf.id] = wf
+            logger.debug("📋 Workflow chargé : %s (%s)", wf.name, wf.id)
+
+        def resolve(wf_id):  # pendant le chargement : tous les workflows lus, valides ou non
+            wf = self._workflows.get(wf_id)
+            return wf.as_actions() if wf else None
+
+        for wf in self._workflows.values():
+            reason = self._validate(wf, resolve)
+            if reason:
+                wf.invalid_reason = reason
+                report_automation_block(_SOURCE, wf.name or wf.id, reason)
+        self._loaded = True
         logger.info("📋 Workflow Engine : %d workflow(s) chargé(s)", len(self._workflows))
+
+    @staticmethod
+    def _validate(wf: Workflow, resolve) -> str:
+        from core.validator import check_automation_actions
+        return check_automation_actions(wf.as_actions(), resolve, (wf.id,))
+
+    def steps_for_validation(self, workflow_id: str) -> Optional[list[dict]]:
+        """Actions d'un workflow valide, pour contrôler une tâche ou un déclencheur qui le lance.
+        None s'il est introuvable ou désactivé."""
+        if not self._loaded:
+            self.load_workflows()
+        wf = self._workflows.get(workflow_id)
+        if wf is None or wf.invalid_reason:
+            return None
+        return wf.as_actions()
 
     def set_execution_callback(self, callback):
         """Callback async pour exécuter une action (async function(action_dict) -> dict)."""
@@ -149,10 +199,35 @@ class WorkflowEngine:
 
     async def run_workflow(self, workflow_id: str) -> dict:
         """Exécute un workflow par son ID."""
+        from core.validator import MAX_WORKFLOW_DEPTH, report_automation_block
+
         wf = self._workflows.get(workflow_id)
         if not wf:
             return {"success": False, "message": f"Workflow '{workflow_id}' introuvable."}
 
+        # B1-ter : garde à l'exécution — cycle ou profondeur, même si le contenu a changé
+        # depuis le chargement ; puis revalidation complète avant la première étape.
+        running = _RUNNING.get()
+        reason = ""
+        if workflow_id in running:
+            reason = f"cycle de workflows à l'exécution : {' → '.join(running + (workflow_id,))}"
+        elif len(running) >= MAX_WORKFLOW_DEPTH:
+            reason = f"profondeur de workflows supérieure à {MAX_WORKFLOW_DEPTH} à l'exécution"
+        else:
+            reason = wf.invalid_reason or self._validate(wf, self.steps_for_validation)
+        if reason:
+            wf.invalid_reason = wf.invalid_reason or reason
+            report_automation_block(_SOURCE, wf.name or wf.id, reason)
+            return {"success": False, "status": "blocked",
+                    "message": f"Workflow '{wf.name}' désactivé : {reason}."}
+
+        token = _RUNNING.set(running + (workflow_id,))
+        try:
+            return await self._run_steps(wf)
+        finally:
+            _RUNNING.reset(token)
+
+    async def _run_steps(self, wf: Workflow) -> dict:
         logger.info("▶️ Exécution workflow : %s (%s)", wf.name, wf.id)
         results = []
 
@@ -314,10 +389,24 @@ class WorkflowEngine:
     async def create_workflow(self, name: str, description: str, steps: list[dict],
                               created_by: str = "atlas_conversation") -> dict:
         """Crée un nouveau workflow et le sauvegarde en YAML."""
+        from core.validator import check_automation_actions
+
         wf_id = name.lower().replace(" ", "_").replace("'", "")
-        # Deduplicate ID if needed
-        if wf_id in self._workflows:
-            wf_id = f"{wf_id}_{str(uuid.uuid4())[:4]}"
+        # Deduplicate ID if needed — B1-ter : un fichier existant (même illisible, donc non
+        # chargé) n'est jamais écrasé.
+        while wf_id in self._workflows or (WORKFLOWS_DIR / f"{wf_id}.yaml").exists():
+            wf_id = f"{name.lower().replace(' ', '_').replace(chr(39), '')}_{str(uuid.uuid4())[:4]}"
+
+        # B1-ter : contrôle à la création, y compris un workflow qui se lancerait lui-même.
+        new_actions = steps if isinstance(steps, list) else None
+        reason = check_automation_actions(
+            new_actions,
+            lambda other: new_actions if other == wf_id else self.steps_for_validation(other),
+            (wf_id,),
+        )
+        if reason:
+            logger.warning("Workflow refusé à la création '%s' : %s", name, reason)
+            return {"success": False, "message": f"Workflow '{name}' refusé : {reason}."}
 
         wf_steps = []
         for s in steps:
@@ -363,6 +452,7 @@ class WorkflowEngine:
                 "description": wf.description,
                 "steps_count": len(wf.steps),
                 "created_by": wf.created_by,
+                "disabled_reason": wf.invalid_reason,
             }
             for wf in self._workflows.values()
         ]

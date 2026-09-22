@@ -134,6 +134,47 @@ def _normalize_app_name(name: str) -> str:
     return clean.strip()
 
 
+# --------------------------------------------------------------------------- #
+#  B1-ter / BT6 — lancement par NOM seulement
+#
+#  Le paramètre `path` n'est utilisé par aucun appel interne, aucun workflow, aucune tâche :
+#  il n'arrivait que par des paramètres produits par le LLM, et ouvrait n'importe quel
+#  fichier (os.startfile exécute .bat, .cmd, .vbs, .js, .hta…). Il est refusé. Un nom qui a
+#  la forme d'un chemin est refusé pour la même raison.
+# --------------------------------------------------------------------------- #
+
+MAX_APP_NAME_CHARS = 80
+_PATH_MARKERS = ("\\", "/", ":", "..")
+
+
+def check_app_name(name) -> tuple[str, str]:
+    """Nom d'application : chaîne courte, sans séparateur de chemin. Retourne (nom, erreur)."""
+    if not isinstance(name, str) or not name.strip():
+        return "", "nom d'application vide ou absent"
+    name = name.strip()
+    if len(name) > MAX_APP_NAME_CHARS:
+        return "", f"nom d'application de {len(name)} caractères, maximum {MAX_APP_NAME_CHARS}"
+    if any(marker in name for marker in _PATH_MARKERS):
+        return "", f"le nom '{name}' a la forme d'un chemin : seul un nom d'application est accepté"
+    if any(unicodedata.category(ch) == "Cc" for ch in name):
+        return "", "caractère de contrôle dans le nom d'application"
+    return name, ""
+
+
+# Repli sur l'index passif (Bureau, Documents, Téléchargements) : seuls les raccourcis sont
+# admis, et jamais depuis Téléchargements. Un .exe/.bat/.cmd trouvé par correspondance
+# approximative de nom serait l'équivalent d'un `path` arbitraire.
+_INDEX_LAUNCHABLE_EXTS = {".lnk", ".url"}
+_INDEX_EXCLUDED_DIRS = ("downloads", "téléchargements", "telechargements")
+
+
+def _index_entry_launchable(path: str, ext: str) -> bool:
+    if ext not in _INDEX_LAUNCHABLE_EXTS:
+        return False
+    parts = {part.lower() for part in pathlib.PureWindowsPath(path).parts}
+    return not any(d in parts for d in _INDEX_EXCLUDED_DIRS)
+
+
 def _build_runtime_app_index() -> dict[str, str]:
     """
     Build a lightweight local index from Start Menu entries to tolerate fuzzy names.
@@ -257,7 +298,7 @@ def _resolve_from_file_index(query_normalized: str) -> tuple[str | None, str | N
         path = str(item.get("path", ""))
         name = str(item.get("name", ""))
         ext = str(item.get("ext", "")).lower()
-        if ext not in {".lnk", ".exe", ".bat", ".cmd", ".url"}:
+        if not _index_entry_launchable(path, ext):
             continue
         nk = _normalize_app_name(pathlib.Path(name).stem)
         if nk and nk not in candidates:
@@ -351,8 +392,20 @@ def launch_app(
     wait_ready: bool = False,
 ) -> dict[str, Any]:
     """
-    Lance une application par nom ou par chemin.
+    Lance une application par son nom.
+
+    B1-ter : `path` est refusé, et un nom en forme de chemin aussi (voir check_app_name).
+    Le paramètre reste dans la signature parce que TOOL_HANDLERS le transmet.
     """
+    if path:
+        logger.warning("[LAUNCH] Chemin refusé : %r", path)
+        return {"success": False,
+                "message": "Action refusée : lancement par chemin interdit, seul un nom d'application est accepté."}
+    name, error = check_app_name(name)
+    if error:
+        logger.warning("[LAUNCH] Nom refusé : %s", error)
+        return {"success": False, "message": f"Action refusée : {error}."}
+
     # Check UWP protocol first
     if name and not path:
         protocol = _UWP_APPS.get(_normalize_app_name(name))

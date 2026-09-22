@@ -353,17 +353,23 @@ async def test_10_workflow_list_templates():
 
 
 # --------------------------------------------------------------------------- #
-#  Test 11 : workflow_run("mode_gaming") exécute les steps dans l'ordre
+#  Test 11 : workflow_run exécute les steps dans l'ordre
+#
+#  B1-ter : ce test utilisait mode_gaming et affirmait que kill_process et system_config
+#  s'exécutaient. Avec un rappel simulé, oui ; en réel, ces deux étapes demandent une
+#  confirmation que personne ne donne, et ne se sont jamais exécutées (anomalie A). Le test
+#  encodait donc le défaut. L'ordre d'exécution est vérifié sur demarrage_matin, dont toutes
+#  les étapes sont autorisées ; mode_gaming doit être refusé, sans aucune étape exécutée.
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_11_workflow_run_mode_gaming():
+async def test_11_workflow_run_execute_les_etapes_dans_lordre():
     from core.workflow_engine import WorkflowEngine
 
     executed_steps = []
 
     async def mock_execute(action):
-        executed_steps.append(action["action"])
+        executed_steps.append((action["action"], action["params"].get("name")))
         return {"status": "success", "message": "ok"}
 
     engine = WorkflowEngine()
@@ -371,12 +377,18 @@ async def test_11_workflow_run_mode_gaming():
     engine.set_notification_callback(AsyncMock())
     engine.load_workflows()
 
-    result = await engine.run_workflow("mode_gaming")
+    result = await engine.run_workflow("demarrage_matin")
     assert result["success"]
-    # Should have kill_process, system_config, launch_app steps (notify handled internally)
-    assert "kill_process" in executed_steps
-    assert "system_config" in executed_steps
-    assert "launch_app" in executed_steps
+    # notify est géré par le moteur, pas par le rappel d'exécution
+    assert executed_steps == [
+        ("launch_app", "opera gx"), ("launch_app", "discord"), ("launch_app", "vscode"),
+        ("get_diagnostics", None),
+    ]
+
+    executed_steps.clear()
+    refused = await engine.run_workflow("mode_gaming")
+    assert refused["success"] is False and "kill_process" in refused["message"]
+    assert executed_steps == []
 
 
 # --------------------------------------------------------------------------- #
@@ -441,11 +453,22 @@ async def test_13_trigger_intouchable_skip(backup_triggers):
     engine._load_triggers()
     engine._running = True
 
+    # B1-ter : kill_process n'est plus admis dans un déclencheur (confirmation impossible) ;
+    # il est refusé dès l'enregistrement. La protection « intouchable » du moteur reste
+    # vérifiée sur une action autorisée qui désigne le même processus.
+    with pytest.raises(ValueError):
+        await engine.add_trigger(ContextTrigger(
+            id="kill_refuse", name="Kill Explorer",
+            condition=TriggerCondition(metric="cpu_usage", operator=">", value=80, duration_seconds=0),
+            actions=[{"action": "kill_process", "params": {"name": "explorer.exe"}}],
+            cooldown_seconds=60,
+        ))
+
     trigger = ContextTrigger(
         id="intouchable_test",
-        name="Kill Explorer",
+        name="Relancer Explorer",
         condition=TriggerCondition(metric="cpu_usage", operator=">", value=80, duration_seconds=0),
-        actions=[{"action": "kill_process", "params": {"name": "explorer.exe"}}],
+        actions=[{"action": "launch_app", "params": {"name": "explorer.exe"}}],
         cooldown_seconds=60,
     )
     await engine.add_trigger(trigger)

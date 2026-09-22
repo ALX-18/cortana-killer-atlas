@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from core.intent_classifier import IntentResult, INTENT_CATEGORIES
+from tools.app_launcher import check_app_name
 from tools.browser_bridge import check_url, get_bridge
 from tools.window_controller import (
     VALID_SNAP_POSITIONS,
@@ -184,6 +185,239 @@ def normalize_hotkey_keys(raw) -> tuple[list[str], str]:
     return keys, ""
 
 
+# --------------------------------------------------------------------------- #
+#  B1-ter — automatisations : la validation comme invariant du stockage
+#
+#  Le planificateur horaire, les déclencheurs et les workflows exécutent des actions
+#  ENREGISTRÉES, sans passer par resolve(). Ces règles s'appliquent à la création, au
+#  chargement et à l'exécution (core/scheduler.py, core/trigger_engine.py,
+#  core/workflow_engine.py, main.execute_automation_action). Une seule définition par
+#  règle : la table ci-dessous réutilise les contrôles purs des outils.
+# --------------------------------------------------------------------------- #
+
+# Profondeur de workflow_run imbriqués : une tâche → workflow → sous-workflow →
+# sous-sous-workflow. Aucun workflow existant n'en imbrique ; au-delà de trois niveaux, une
+# chaîne n'est plus lisible par l'utilisateur qui l'a acceptée, et une erreur s'amplifie.
+MAX_WORKFLOW_DEPTH = 3
+MAX_NOTIFY_CHARS = 500
+MAX_CLEANUP_AGE_DAYS = 365
+
+
+def _unexpected(params: dict, allowed: set) -> str:
+    extra = sorted(set(params) - allowed)
+    return f"paramètre(s) inattendu(s) : {extra}" if extra else ""
+
+
+def _check_no_params(params: dict) -> str:
+    return _unexpected(params, set())
+
+
+def _check_launch_app_call(params: dict) -> str:
+    if "path" in params:
+        return "paramètre 'path' interdit : seul un nom d'application est accepté"
+    error = _unexpected(params, {"name", "wait"})
+    if error:
+        return error
+    _, error = check_app_name(params.get("name"))
+    if error:
+        return error
+    if "wait" in params and not isinstance(params["wait"], bool):
+        return "'wait' doit être un booléen"
+    return ""
+
+
+def _check_notify_call(params: dict) -> str:
+    error = _unexpected(params, {"message", "title", "duration_seconds"})
+    if error:
+        return error
+    message = params.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return "message de notification vide ou absent"
+    if len(message) > MAX_NOTIFY_CHARS:
+        return f"message de {len(message)} caractères, maximum {MAX_NOTIFY_CHARS}"
+    title = params.get("title", "Atlas")
+    if not isinstance(title, str) or len(title) > 100:
+        return "titre de notification invalide"
+    duration = params.get("duration_seconds", 5)
+    if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= 60:
+        return "durée de notification invalide (1 à 60 s)"
+    return ""
+
+
+def _check_cleanup_temp_call(params: dict) -> str:
+    error = _unexpected(params, {"max_age_days"})
+    if error:
+        return error
+    age = params.get("max_age_days", 7)
+    if not isinstance(age, int) or isinstance(age, bool) or not 1 <= age <= MAX_CLEANUP_AGE_DAYS:
+        return f"'max_age_days' invalide : {age!r} (entier de 1 à {MAX_CLEANUP_AGE_DAYS})"
+    return ""
+
+
+def _check_workflow_run_call(params: dict) -> str:
+    error = _unexpected(params, {"workflow_id"})
+    if error:
+        return error
+    wf_id = params.get("workflow_id")
+    if not isinstance(wf_id, str) or not wf_id.strip() or len(wf_id) > 100:
+        return "identifiant de workflow vide ou invalide"
+    return ""
+
+
+# Table outil → contrôle. Un outil absent de cette table n'a pas sa place dans une
+# automatisation (BT2) ; sa présence ici vaut autorisation.
+AUTOMATION_ACTION_CHECKS = {
+    "launch_app": _check_launch_app_call,
+    "notify": _check_notify_call,
+    "get_diagnostics": _check_no_params,
+    "maintenance_cleanup_temp": _check_cleanup_temp_call,
+    "maintenance_gc": _check_no_params,
+    "workflow_run": _check_workflow_run_call,
+}
+
+# Motif de refus, par famille, pour que le message dise POURQUOI.
+_AUTOMATION_EXCLUSIONS = {
+    "action interactive : la fenêtre au premier plan au moment du déclenchement est inconnue": {
+        "window_type", "window_hotkey", "window_click", "window_close", "window_focus",
+        "window_minimize", "window_maximize", "window_snap", "ui_click_element",
+        "web_search_to_notepad", "browser_click", "browser_type", "browser_scroll", "browser_close",
+        "browser_navigate", "browser_new_tab", "browser_ext_click", "browser_ext_type",
+        "browser_ext_scroll",
+    },
+    "confirmation obligatoire, impossible sans utilisateur présent": {
+        "kill_process", "run_powershell", "system_config", "browser_open",
+    },
+    "une automatisation ne crée, ne modifie ni ne relance d'autre automatisation": {
+        "schedule_add", "schedule_remove", "schedule_run_now", "trigger_add", "trigger_toggle",
+        "workflow_create",
+    },
+    "suppression définitive, rejouée à chaque exécution": {"maintenance_empty_bin"},
+    "rejoue une action qui dépend du moment où elle a eu lieu": {"redo_last_action"},
+    "paramètres non contrôlés (priorité de processus)": {"set_priority"},
+    "sans effet utile : le résultat n'est remis à personne": {
+        "list_processes", "window_list", "window_find", "window_get_active", "window_screenshot",
+        "schedule_list", "trigger_list", "workflow_list", "browser_current_url",
+        "browser_ext_get_content", "browser_ext_get_url", "browser_bridge_status",
+        "web_search", "read_url", "screen_read",
+    },
+}
+
+
+def _exclusion_reason(tool: str) -> str:
+    for reason, tools in _AUTOMATION_EXCLUSIONS.items():
+        if tool in tools:
+            return reason
+    return "outil inconnu"
+
+
+def check_automation_action(action) -> str:
+    """Contrôle UNE action enregistrée ({"action": outil, "params": {...}}). Erreur ou ""."""
+    if not isinstance(action, dict):
+        return f"action malformée ({type(action).__name__} au lieu d'un objet)"
+    tool = action.get("action")
+    if not isinstance(tool, str) or not tool:
+        return "action sans nom d'outil"
+    params = action.get("params") or {}
+    if not isinstance(params, dict):
+        return f"'{tool}' : paramètres malformés"
+    check = AUTOMATION_ACTION_CHECKS.get(tool)
+    if check is None:
+        return f"action '{tool}' non autorisée dans une automatisation ({_exclusion_reason(tool)})"
+    error = check(params)
+    return f"'{tool}' : {error}" if error else ""
+
+
+def check_automation_actions(actions, resolve_workflow=None, stack: tuple = ()) -> str:
+    """Contrôle une liste d'actions, en descendant dans les workflow_run (cycles, profondeur).
+
+    resolve_workflow(id) -> liste d'actions du workflow, ou None s'il est introuvable ou
+    désactivé. `stack` : workflows déjà traversés, le plus externe en premier.
+    """
+    if not isinstance(actions, list):
+        return "liste d'actions malformée"
+    for index, action in enumerate(actions, 1):
+        error = check_automation_action(action)
+        if not error and action.get("action") == "workflow_run":
+            wf_id = (action.get("params") or {})["workflow_id"].strip()
+            error = _check_workflow_chain(wf_id, resolve_workflow, stack)
+        if error:
+            return f"action {index} — {error}"
+    return ""
+
+
+def _check_workflow_chain(wf_id: str, resolve_workflow, stack: tuple) -> str:
+    chain = " → ".join(stack + (wf_id,))
+    if wf_id in stack:
+        return f"cycle de workflows : {chain}"
+    if len(stack) >= MAX_WORKFLOW_DEPTH:
+        return f"profondeur de workflows supérieure à {MAX_WORKFLOW_DEPTH} : {chain}"
+    if resolve_workflow is None:
+        return ""
+    steps = resolve_workflow(wf_id)
+    if steps is None:
+        return f"workflow '{wf_id}' introuvable ou désactivé"
+    error = check_automation_actions(steps, resolve_workflow, stack + (wf_id,))
+    return f"workflow '{wf_id}' : {error}" if error else ""
+
+
+# --- Signalement (BT1) : une automatisation bloquée ne doit jamais se taire --- #
+
+AUTOMATION_TOAST_INTERVAL_S = 1800.0
+_automation_notifier = None           # callable(titre, message), installé par main.py
+_automation_last_toast: dict = {}     # (source, élément) → horodatage de la dernière notification
+
+
+def set_automation_notifier(notifier) -> None:
+    global _automation_notifier
+    _automation_notifier = notifier
+
+
+def report_automation_block(source: str, item: str, reason: str) -> None:
+    """Journalise ET signale une automatisation bloquée.
+
+    Trois canaux : le log applicatif ; une ligne ERR_AUTOMATION_BLOCKED dans le journal
+    d'actions, celui que sert /api/logs/recent ; une notification Windows, au plus une par
+    élément toutes les 30 minutes pour qu'un déclencheur réévalué toutes les 10 s ne noie
+    pas l'utilisateur.
+    """
+    import json
+    from datetime import datetime
+
+    import core.atlas_logger as atlas_logger
+
+    logger.warning("[AUTOMATION] %s « %s » bloqué : %s", source, item, reason)
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "user_input": f"automation:{source}",
+        "intent": "automation/blocked",
+        "tool": None,
+        "target": item,
+        "result": "blocked",
+        "error": reason,
+        "error_code": "ERR_AUTOMATION_BLOCKED",
+        "latency_ms": 0,
+        "retry_count": 0,
+        "grounding_layer": None,
+        "pipeline_stage": f"automation:{source}",
+    }
+    try:
+        atlas_logger.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(atlas_logger.LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.error("[AUTOMATION] journal d'actions inaccessible : %s", e)
+
+    key = (source, item)
+    now = time.time()
+    if _automation_notifier is None or now - _automation_last_toast.get(key, float("-inf")) < AUTOMATION_TOAST_INTERVAL_S:
+        return
+    _automation_last_toast[key] = now
+    try:
+        _automation_notifier("Atlas — automatisation bloquée", f"{source} « {item} » : {reason}")
+    except Exception as e:
+        logger.error("[AUTOMATION] notification impossible : %s", e)
+
+
 class Validator:
     """Mappe une intention vers un outil exact de façon déterministe."""
 
@@ -270,8 +504,16 @@ class Validator:
                         type="window_visible", target=target or "",
                     )
                 else:
+                    # B1-ter / BT6 : lancement par nom seulement. `path` exécutait n'importe
+                    # quel fichier, et n'est utilisé par aucun appel légitime.
+                    if params.get("path"):
+                        return self._reject(intent, "lancement par chemin interdit",
+                                            "Donne le nom de l'application, par exemple « ouvre Steam ».")
+                    name, error = check_app_name(target or params.get("name"))
+                    if error:
+                        return self._reject(intent, f"application à lancer invalide ({error})")
                     tool_name = "launch_app"
-                    params = {"name": target} if target else params
+                    params = {"name": name}
                     verification = VerificationRule(
                         type="process_running", target=target or "",
                     )
@@ -478,6 +720,15 @@ class Validator:
 
         # --- Automation specializations ---
         elif category == "automation":
+            # B1-ter : le contenu d'une automatisation est contrôlé dès la demande, avant la
+            # confirmation. Le moteur le recontrôle à l'enregistrement, au chargement, à
+            # l'exécution.
+            stored = params.get("steps") if verb == "workflow_create" else params.get("actions")
+            if verb in ("schedule", "trigger", "workflow_create") and stored:
+                from core.workflow_engine import get_workflow_engine
+                error = check_automation_actions(stored, get_workflow_engine().steps_for_validation)
+                if error:
+                    return self._reject(intent, f"automatisation refusée ({error})")
             if verb == "schedule":
                 tool_name = "schedule_add"
                 confirmation = True

@@ -195,6 +195,38 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 #  Lifespan — startup / shutdown
 # --------------------------------------------------------------------------- #
 
+async def execute_automation_action(action: dict) -> dict:
+    """Point d'exécution commun du planificateur, des déclencheurs et des workflows (B1-ter).
+
+    Ces chemins ne passent pas par le validateur : l'action enregistrée est recontrôlée ici,
+    au moment de l'exécution. Une action qui demande une confirmation — impossible sans
+    utilisateur présent — n'est plus laissée en attente en silence : elle est annulée,
+    journalisée et signalée.
+    """
+    from core.confirmation import resolve_pending
+    from core.context_monitor import collect_context
+    from core.intent_engine import execute_tool
+    from core.validator import check_automation_action, report_automation_block
+
+    tool = action.get("action", "") if isinstance(action, dict) else ""
+    error = check_automation_action(action)
+    if error:
+        report_automation_block("automatisation", tool or "?", error)
+        return {"status": "blocked", "message": f"Action refusée : {error}.",
+                "error_code": "ERR_AUTOMATION_BLOCKED"}
+
+    result = await execute_tool(tool, action.get("params") or {}, collect_context())
+    if result.get("status") == "confirmation_required":
+        if result.get("confirmation_id"):
+            resolve_pending(result["confirmation_id"])
+        reason = (f"'{tool}' demande une confirmation, impossible en exécution automatique"
+                  f" ({result.get('reason') or result.get('message') or 'sans motif'})")
+        report_automation_block("automatisation", tool, reason)
+        return {"status": "blocked", "message": f"Action non exécutée : {reason}.",
+                "error_code": "ERR_AUTOMATION_BLOCKED"}
+    return result
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise la détection des habitudes et la mémoire au démarrage."""
@@ -203,7 +235,7 @@ async def lifespan(app: FastAPI):
     from tools.browser_bridge import get_bridge
     from core.world_state import get_world_state
     from core.intent_classifier import get_classifier
-    from core.validator import get_validator
+    from core.validator import get_validator, set_automation_notifier
     from core.intent_engine import get_execution_engine, execute_tool
     from core.scheduler import get_scheduler
     from core.trigger_engine import get_trigger_engine
@@ -271,11 +303,16 @@ async def lifespan(app: FastAPI):
     # --- MVP 3.0 : Automation components ---
 
     # Shared execution callback for scheduler/trigger/workflow
-    async def _execute_action(action: dict) -> dict:
-        tool_name = action.get("action", "")
-        params = action.get("params", {})
-        context = collect_context()
-        return await execute_tool(tool_name, params, context)
+    # B1-ter : contrôle à l'exécution et signalement, voir execute_automation_action.
+    _execute_action = execute_automation_action
+
+    def _automation_toast(title: str, message: str) -> None:
+        try:
+            asyncio.get_running_loop().create_task(notify(message, title=title))
+        except RuntimeError:
+            logger.warning("[AUTOMATION] notification impossible hors boucle : %s", message)
+
+    set_automation_notifier(_automation_toast)
 
     # Protection callback
     def _check_protection(process_name: str) -> str:
@@ -285,6 +322,14 @@ async def lifespan(app: FastAPI):
         elif "DEMANDE" in level:
             return "demande"
         return "libre"
+
+    # Workflow Engine — B1-ter : chargé en premier, les tâches et déclencheurs qui lancent un
+    # workflow sont contrôlés contre cette liste.
+    workflow_engine = get_workflow_engine()
+    workflow_engine.set_execution_callback(_execute_action)
+    workflow_engine.set_protection_callback(_check_protection)
+    workflow_engine.set_notification_callback(lambda msg: notify(msg))
+    workflow_engine.load_workflows()
 
     # Scheduler
     scheduler = get_scheduler()
@@ -300,13 +345,6 @@ async def lifespan(app: FastAPI):
     trigger_check_interval = CONFIG.get("automation", {}).get("trigger_check_interval_seconds", 10)
     trigger_engine.set_check_interval(trigger_check_interval)
     await trigger_engine.start()
-
-    # Workflow Engine
-    workflow_engine = get_workflow_engine()
-    workflow_engine.set_execution_callback(_execute_action)
-    workflow_engine.set_protection_callback(_check_protection)
-    workflow_engine.set_notification_callback(lambda msg: notify(msg))
-    workflow_engine.load_workflows()
 
     logger.info("🤖 Architecture v3.0 : Scheduler + TriggerEngine + WorkflowEngine initialisés")
 
