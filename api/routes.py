@@ -462,6 +462,7 @@ async def api_health():
         if not tts["ok"]:
             raisons.append("aucune synthèse vocale disponible")
         voice_status.update({
+            "activity": getattr(voice, "activity", None),
             "wake_word": wake,
             "stt": stt,
             "tts": tts,

@@ -89,6 +89,7 @@ class VoiceEngine:
         self._piper_voice = None
         self._tts_backend = None       # piper | sapi | aucun — dernier moyen ayant parlé
         self._last_wake_score = 0.0
+        self._activity = "repos"       # repos | écoute | réfléchit | parle (indicateur visuel)
         self._stt_device_used = None   # cuda | cpu — ce qui a réellement servi
         self._stt_error = None
         self._cublas_available = None
@@ -110,8 +111,7 @@ class VoiceEngine:
         # (chargement, noyaux CUDA, détecteur de voix). On le paie au démarrage, en tâche
         # de fond, pour que la première commande de l'utilisateur soit rapide.
         asyncio.create_task(self._prewarm_stt())
-        if self._systray:
-            self._systray.set_state("idle")
+        self._set_activity("idle")
         logger.info("VoiceEngine started.")
 
     async def stop(self):
@@ -134,9 +134,25 @@ class VoiceEngine:
 
         self._wake_model = None
 
-        if self._systray:
-            self._systray.set_state("idle")
+        self._set_activity("idle")
         logger.info("VoiceEngine stopped.")
+
+    # Sprint E — demande d'Alexis : savoir quand Atlas écoute, dans la fenêtre comme dans
+    # la zone de notification. Une seule source d'état pour les deux.
+    _ACTIVITY_LABELS = {"idle": "repos", "listening": "écoute",
+                        "processing": "réfléchit", "speaking": "parle"}
+
+    def _set_activity(self, state: str) -> None:
+        self._activity = self._ACTIVITY_LABELS.get(state, state)
+        if self._systray:
+            try:
+                self._systray.set_state(state)
+            except Exception as e:
+                logger.debug("Systray indisponible : %s", e)
+
+    @property
+    def activity(self) -> str:
+        return self._activity
 
     def _resolve_wake_word_model(self) -> tuple[str, bool]:
         """
@@ -276,8 +292,7 @@ class VoiceEngine:
 
     async def _listen_loop(self):
         """Continuously process wake-word frames from audio callback."""
-        if self._systray:
-            self._systray.set_state("idle")
+        self._set_activity("idle")
 
         while self._running:
             try:
@@ -299,22 +314,40 @@ class VoiceEngine:
 
     async def _on_wake_word(self):
         """Wake-word callback pipeline."""
-        if self._systray:
-            self._systray.set_state("listening")
+        self._set_activity("listening")
 
+        # E7 : sans ces traces, impossible de mesurer quoi que ce soit après une séance au
+        # micro — ni le nombre de déclenchements, ni la latence, ni ce qu'Atlas a compris.
+        t_wake = time.monotonic()
+        logger.info("[VOIX] Mot d'éveil détecté (score=%.3f, seuil=%.2f) — j'écoute.",
+                    self._last_wake_score, self._wake_threshold)
         try:
             audio = await self._record_audio()
+            t_record = time.monotonic()
             text = await self._transcribe(audio)
+            t_stt = time.monotonic()
+            logger.info("[VOIX] Transcription (%.2fs, %s) : %r",
+                        t_stt - t_record, self._stt_device_used, text)
 
             if not text.strip():
                 await self._speak("Je n'ai rien entendu.")
+                logger.info("[VOIX] Cycle terminé sans transcription — total %.1fs",
+                            time.monotonic() - t_wake)
                 return
 
-            if self._systray:
-                self._systray.set_state("processing")
+            self._set_activity("processing")
 
             response_text = await self._run_text_pipeline(text)
+            t_think = time.monotonic()
+            self._set_activity("speaking")
             await self._speak(response_text)
+            t_speak = time.monotonic()
+            logger.info(
+                "[VOIX] Cycle : écoute %.1fs + transcription %.2fs + réflexion %.1fs + "
+                "parole %.1fs = %.1fs depuis le mot d'éveil (moteur=%s) — réponse : %r",
+                t_record - t_wake, t_stt - t_record, t_think - t_stt, t_speak - t_think,
+                t_speak - t_wake, self._tts_backend, response_text[:120],
+            )
         except Exception as e:
             logger.error("Voice pipeline error: %s", e, exc_info=True)
             if self._systray:
@@ -324,8 +357,7 @@ class VoiceEngine:
             except Exception:
                 pass
         finally:
-            if self._systray:
-                self._systray.set_state("idle")
+            self._set_activity("idle")
 
     async def _record_audio(self) -> bytes:
         """Record mic input until silence or max duration, returns PCM16 bytes."""
