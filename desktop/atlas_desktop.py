@@ -194,7 +194,9 @@ class AtlasDesktop:
 
     def _set_voice_state(self, voice: dict):
         """Affiche l'état réel de la voix : /api/health dit ce qu'Atlas sait faire."""
-        if not isinstance(voice, dict) or not voice:
+        if voice is None:
+            etat, detail = "arrêtée", "backend indisponible (démarrage en cours ?)"
+        elif not isinstance(voice, dict) or not voice:
             etat, detail = "problème", "état inconnu"
         elif not voice.get("enabled"):
             etat, detail = "arrêtée", "voix désactivée dans la configuration"
@@ -328,7 +330,8 @@ class AtlasDesktop:
                     if ollama_ok is not None:
                         status_line += f" | Ollama: {'ok' if ollama_ok else 'down'}"
                     self.health_text.config(text=status_line)
-                    self._set_voice_state(services.get("voice", {}) if isinstance(services, dict) else {})
+                elif role == "voice":
+                    self._set_voice_state(payload)
                 elif role == "atlas":
                     self._append("atlas", payload)
                 elif role == "system":
@@ -342,9 +345,26 @@ class AtlasDesktop:
         self.root.after(100, self._tick_queue)
 
     def _poll_voice_state(self):
-        """Interroge /api/health toutes les 2 s : l'écoute doit se voir en direct."""
-        self.refresh_health()
-        self.root.after(2000, self._poll_voice_state)
+        """Suit l'état de la voix toutes les 1,5 s, en silence.
+
+        Sprint E : ce suivi appelait /api/health, qui sonde Ollama et SearXNG à chaque fois.
+        Les appels s'empilaient et le fil se remplissait de « Health check failed ». On
+        interroge désormais /api/voice/state, qui ne lit que l'état en mémoire, et un échec
+        n'écrit rien dans la conversation.
+        """
+        base = self._load_api_base()
+
+        def _job():
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    r = client.get(f"{base}/api/voice/state")
+                    r.raise_for_status()
+                    self._messages.put(("voice", r.json()))
+            except Exception:
+                self._messages.put(("voice", None))   # backend pas encore prêt : silence
+
+        threading.Thread(target=_job, daemon=True).start()
+        self.root.after(1500, self._poll_voice_state)
 
     def _run_request(self, worker):
         t = threading.Thread(target=worker, daemon=True)

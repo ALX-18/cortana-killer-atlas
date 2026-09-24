@@ -546,9 +546,13 @@ class VoiceEngine:
     def stt_status(self) -> dict:
         """État réel de la transcription, pour /api/health (E4)."""
         if self._cublas_available is None:
+            # Une seule fois : ce contrôle parcourt les répertoires de DLL, et cet état est
+            # interrogé toutes les 1,5 s par l'indicateur d'écoute.
             available, detail = ensure_cuda_libraries()
+            self._cublas_available = available
+            self._cuda_detail = detail
         else:
-            available, detail = self._cublas_available, None
+            available, detail = self._cublas_available, getattr(self, "_cuda_detail", None)
         return {
             "device_configured": self._config.get("stt_device", "cuda"),
             "device_used": self._stt_device_used,     # None tant qu'aucune transcription
