@@ -506,18 +506,31 @@ def check_voice(settings: dict | None) -> list[Check]:
     except Exception:
         pass
 
-    # Le repli TTS de voice_engine appelle l'exécutable `piper` : il doit être dans le PATH
-    # (venv activé) et fonctionner (piper-tts 1.4.x n'installe pas sa dépendance pathvalidate).
-    piper_exe = shutil.which("piper")
-    if piper_exe:
-        code, out = _run([piper_exe, "--help"], timeout=30)
-        checks.append(Check("Voix", "CLI piper exécutable (repli TTS)", code == 0, sev,
-                            piper_exe if code == 0 else out.strip().splitlines()[-1][:200],
-                            "pip install pathvalidate  (ou piper-tts >= 1.8)"))
-    else:
-        checks.append(Check("Voix", "CLI piper exécutable (repli TTS)", False, sev,
-                            "piper absent du PATH : aucune réponse vocale ne sera jouée",
-                            "Activer le venv avant de lancer Atlas : .venv\\Scripts\\activate"))
+    # Sprint E : le repli de synthèse est la voix intégrée de Windows (SAPI via pyttsx3),
+    # plus l'exécutable `piper` en ligne de commande.
+    try:
+        import pyttsx3  # noqa: F401
+        checks.append(Check("Voix", "Repli voix Windows (SAPI)", True, WARNING,
+                            "pyttsx3 disponible : Atlas parlera même si Piper échoue"))
+    except Exception as e:
+        checks.append(Check("Voix", "Repli voix Windows (SAPI)", False, WARNING, str(e)[:120],
+                            "pip install pyttsx3"))
+
+    # Sprint E / L2 : la transcription GPU exige cuBLAS et cuDNN, fournis par les paquets pip
+    # nvidia-*. Sans eux, CTranslate2 échoue et Atlas retombe sur le processeur (~5 s/phrase).
+    if str(voice.get("stt_device", "cuda")) == "cuda":
+        try:
+            sys.path.insert(0, str(ROOT))
+            from core.voice_engine import ensure_cuda_libraries
+
+            ok, detail = ensure_cuda_libraries()
+            checks.append(Check("Voix", "Bibliothèques CUDA pour la transcription (cuBLAS/cuDNN)",
+                                ok, sev, detail[:200],
+                                "pip install nvidia-cublas-cu12 nvidia-cudnn-cu12"))
+        except Exception as e:
+            checks.append(Check("Voix", "Bibliothèques CUDA pour la transcription (cuBLAS/cuDNN)",
+                                False, sev, str(e)[:160],
+                                "pip install nvidia-cublas-cu12 nvidia-cudnn-cu12"))
 
     hf = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
     stt = voice.get("stt_model", "base")

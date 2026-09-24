@@ -14,6 +14,44 @@ import numpy as np
 logger = logging.getLogger("atlas.voice")
 
 
+def ensure_cuda_libraries() -> tuple[bool, str]:
+    """Rend cuBLAS et cuDNN chargeables par CTranslate2. Retourne (disponible, détail).
+
+    E2 / L2 : la transcription GPU échouait sur « cublas64_12.dll is not found ». Les DLL
+    viennent des paquets pip `nvidia-cublas-cu12` et `nvidia-cudnn-cu12` — décision du
+    superviseur, pour ne pas imposer le CUDA Toolkit complet. CTranslate2 les charge par le
+    chemin de recherche du processus : `os.add_dll_directory` ne suffit pas, il faut aussi
+    les déclarer dans PATH, avant le premier chargement du modèle.
+    """
+    import os
+
+    try:
+        import nvidia
+    except Exception as e:
+        return False, f"paquets pip nvidia-* absents ({e})"
+
+    dirs = []
+    for base in getattr(nvidia, "__path__", []):
+        for sub in pathlib.Path(base).glob("*/bin"):
+            if sub.is_dir() and any(sub.glob("*.dll")):
+                dirs.append(str(sub))
+    if not dirs:
+        return False, "aucun répertoire de DLL nvidia trouvé"
+
+    current = os.environ.get("PATH", "")
+    missing = [d for d in dirs if d not in current]
+    if missing:
+        os.environ["PATH"] = os.pathsep.join(missing) + os.pathsep + current
+    for d in dirs:
+        try:
+            os.add_dll_directory(d)
+        except Exception:
+            pass
+    cublas = any(pathlib.Path(d).joinpath("cublas64_12.dll").exists() for d in dirs)
+    return cublas, ("cuBLAS et cuDNN déclarés : " + ", ".join(dirs)) if cublas \
+        else "cublas64_12.dll introuvable dans les paquets nvidia"
+
+
 def _load_voice_config() -> dict:
     cfg_path = pathlib.Path(__file__).resolve().parent.parent / "config" / "settings.json"
     with open(cfg_path, encoding="utf-8") as f:
@@ -48,6 +86,12 @@ class VoiceEngine:
         self._last_wake_ts = 0.0
 
         self._whisper_model = None
+        self._piper_voice = None
+        self._tts_backend = None       # piper | sapi | aucun — dernier moyen ayant parlé
+        self._last_wake_score = 0.0
+        self._stt_device_used = None   # cuda | cpu — ce qui a réellement servi
+        self._stt_error = None
+        self._cublas_available = None
 
     async def start(self):
         """Start wake-word listener when voice is enabled."""
@@ -62,6 +106,10 @@ class VoiceEngine:
 
         self._running = True
         self._listener_task = asyncio.create_task(self._listen_loop())
+        # E2 : le premier appel au modèle de transcription coûte une dizaine de secondes
+        # (chargement, noyaux CUDA, détecteur de voix). On le paie au démarrage, en tâche
+        # de fond, pour que la première commande de l'utilisateur soit rapide.
+        asyncio.create_task(self._prewarm_stt())
         if self._systray:
             self._systray.set_state("idle")
         logger.info("VoiceEngine started.")
@@ -179,11 +227,13 @@ class VoiceEngine:
                 return
             try:
                 if self._loop and self._running:
+                    # E1 / L1 : openWakeWord attend du PCM int16 brut. Diviser par 32768
+                    # écrasait l'amplitude et le score tombait à 0,0008 au lieu de 0,995 —
+                    # le mot d'éveil ne pouvait structurellement pas se déclencher.
                     pcm = np.array(indata, dtype=np.int16).reshape(-1)
-                    audio_f32 = pcm.astype(np.float32) / 32768.0
-                    self._loop.call_soon_threadsafe(self._wake_queue.put_nowait, audio_f32)
-            except Exception:
-                pass
+                    self._loop.call_soon_threadsafe(self._wake_queue.put_nowait, pcm)
+            except Exception as e:
+                logger.debug("Wake callback error: %s", e)
 
         self._wake_stream = sd.InputStream(
             samplerate=self._wake_sample_rate,
@@ -194,12 +244,11 @@ class VoiceEngine:
         )
         self._wake_stream.start()
 
-    def _wake_detected(self, audio_f32: np.ndarray) -> bool:
-        """Return True when wake word score crosses threshold."""
+    def _wake_score(self, audio_int16: np.ndarray) -> float:
+        """Score du modèle de mot d'éveil pour une trame (PCM int16)."""
         if self._wake_model is None:
-            return False
-
-        scores = self._wake_model.predict(audio_f32)
+            return 0.0
+        scores = self._wake_model.predict(np.asarray(audio_int16, dtype=np.int16))
         if isinstance(scores, dict):
             if self._wake_score_key in scores:
                 score = float(scores[self._wake_score_key])
@@ -209,6 +258,15 @@ class VoiceEngine:
             score = float(np.max(scores)) if len(scores) else 0.0
         else:
             score = float(scores or 0.0)
+        return score
+
+    def _wake_detected(self, audio_int16: np.ndarray) -> bool:
+        """Return True when wake word score crosses threshold."""
+        if self._wake_model is None:
+            return False
+
+        score = self._wake_score(audio_int16)
+        self._last_wake_score = score
 
         now = time.monotonic()
         if score >= self._wake_threshold and (now - self._last_wake_ts) > 1.5:
@@ -322,7 +380,25 @@ class VoiceEngine:
         if self._whisper_model is None:
             model_name = self._config.get("stt_model", "base")
             device = self._config.get("stt_device", "cuda")
-            self._whisper_model = WhisperModel(model_name, device=device, compute_type="int8")
+            if device == "cuda":
+                ok, detail = ensure_cuda_libraries()
+                self._cublas_available = ok
+                if not ok:
+                    logger.warning("[VOIX] CUDA indisponible (%s)", detail)
+                else:
+                    logger.info("[VOIX] %s", detail)
+            try:
+                self._whisper_model = WhisperModel(model_name, device=device, compute_type="int8")
+                self._stt_device_used = device
+                self._stt_error = None
+            except Exception as e:
+                # E2 : le repli processeur est acceptable, le repli SILENCIEUX ne l'est pas.
+                # Sur cette chaîne, le processeur coûte ~5 s par phrase contre 0,1 s sur GPU.
+                self._stt_error = f"{type(e).__name__}: {e}"
+                logger.error("[VOIX] Transcription sur '%s' impossible (%s) — repli processeur, "
+                             "la réponse sera nettement plus lente.", device, self._stt_error)
+                self._whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+                self._stt_device_used = "cpu"
 
         audio_np = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
         language = self._config.get("stt_language", "fr")
@@ -337,65 +413,155 @@ class VoiceEngine:
             return
         await asyncio.to_thread(self._speak_sync, text)
 
-    def _speak_sync(self, text: str):
+    def _speak_sync(self, text: str) -> bool:
+        """Dit le texte à voix haute. Retourne True si une voix a parlé.
+
+        E3 / L3 : trois défauts corrigés ici.
+        - piper-tts >= 1.3 renvoie un itérable d'AudioChunk ; le code attendait un tuple.
+        - L'exception était avalée par un `except Exception: pass`, donc personne ne savait
+          que la voix était muette.
+        - Le repli décidé au sprint 0 (voix Windows SAPI) n'avait jamais été implémenté.
+        """
+        if not text:
+            return False
+        if self._speak_piper(text):
+            return True
+        logger.warning("[VOIX] Piper indisponible — repli sur la voix Windows (SAPI).")
+        if self._speak_sapi(text):
+            self._tts_backend = "sapi"
+            return True
+        logger.error("[VOIX] Aucune synthèse disponible : ni Piper, ni SAPI. Atlas reste muet.")
+        self._tts_backend = "aucun"
+        return False
+
+    def _speak_piper(self, text: str) -> bool:
+        """Synthèse Piper. Journalise tout échec au lieu de l'avaler."""
         import sounddevice as sd
 
-        # Prefer piper-tts python API if available.
+        model_name = self._config.get("tts_voice", "fr_FR-siwis-medium")
+        model_path = (pathlib.Path(__file__).resolve().parent.parent
+                      / "data" / "voices" / f"{model_name}.onnx")
+        if not model_path.exists():
+            logger.warning("[VOIX] Modèle Piper introuvable : %s", model_path)
+            return False
         try:
             from piper.voice import PiperVoice
 
-            model_name = self._config.get("tts_voice", "fr_FR-siwis-medium")
-            model_path = pathlib.Path(__file__).resolve().parent.parent / "data" / "voices" / f"{model_name}.onnx"
-            if not model_path.exists():
-                logger.warning("Piper model not found: %s", model_path)
-                return
-
-            voice = PiperVoice.load(str(model_path))
-            audio = voice.synthesize(text)
-            if isinstance(audio, tuple):
-                samples, sample_rate = audio
-            else:
-                samples, sample_rate = audio, 22050
+            if self._piper_voice is None:
+                self._piper_voice = PiperVoice.load(str(model_path))
+            voice = self._piper_voice
+            chunks = list(voice.synthesize(text))
+            if not chunks:
+                logger.warning("[VOIX] Piper n'a produit aucun échantillon pour : %s", text[:60])
+                return False
+            samples = np.concatenate([np.asarray(c.audio_int16_array, dtype=np.int16)
+                                      for c in chunks])
+            sample_rate = getattr(chunks[0], "sample_rate", None) or voice.config.sample_rate
+            if samples.size == 0:
+                logger.warning("[VOIX] Piper a produit un flux vide.")
+                return False
             sd.play(samples, sample_rate)
             sd.wait()
-            return
-        except Exception:
-            pass
-
-        # Fallback to piper executable if available locally.
-        try:
-            import subprocess
-
-            model_name = self._config.get("tts_voice", "fr_FR-siwis-medium")
-            model_path = pathlib.Path(__file__).resolve().parent.parent / "data" / "voices" / f"{model_name}.onnx"
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as out_wav:
-                out_path = out_wav.name
-
-            cmd = [
-                "piper",
-                "--model",
-                str(model_path),
-                "--output_file",
-                out_path,
-            ]
-            subprocess.run(cmd, input=text, text=True, capture_output=True, check=False)
-
-            # Play generated wav if present.
-            if pathlib.Path(out_path).exists():
-                import wave
-
-                with wave.open(out_path, "rb") as wf:
-                    frames = wf.readframes(wf.getnframes())
-                    sr = wf.getframerate()
-                    channels = wf.getnchannels()
-                arr = np.frombuffer(frames, dtype=np.int16)
-                if channels > 1:
-                    arr = arr.reshape(-1, channels)
-                sd.play(arr, sr)
-                sd.wait()
-            pathlib.Path(out_path).unlink(missing_ok=True)
+            self._tts_backend = "piper"
+            return True
         except Exception as e:
-            logger.warning("TTS unavailable: %s", e)
+            self._piper_voice = None
+            logger.warning("[VOIX] Échec de la synthèse Piper (%s) : %s", type(e).__name__, e)
+            return False
+
+    def _speak_sapi(self, text: str) -> bool:
+        """Repli sur la voix intégrée de Windows. Aucun modèle, aucune VRAM."""
+        try:
+            import pyttsx3
+
+            engine = pyttsx3.init()
+            engine.say(text)
+            engine.runAndWait()
+            engine.stop()
+            logger.info("[VOIX] Phrase dite par la voix Windows (SAPI) : %s", text[:60])
+            return True
+        except Exception as e:
+            logger.error("[VOIX] Repli SAPI indisponible (%s) : %s", type(e).__name__, e)
+            return False
+
+    async def _prewarm_stt(self) -> None:
+        """Charge le modèle de transcription et déclenche ses initialisations coûteuses."""
+        try:
+            silence = np.zeros(int(0.5 * 16000), dtype=np.int16).tobytes()
+            start = time.monotonic()
+            await self._transcribe(silence)
+            logger.info("[VOIX] Transcription préchauffée en %.1fs (device=%s)",
+                        time.monotonic() - start, self._stt_device_used)
+        except Exception as e:
+            logger.warning("[VOIX] Préchauffage de la transcription impossible : %s", e)
+
+    def _announce_on_screen(self, titre: str, message: str) -> None:
+        """Rend visible à l'écran ce que la voix ne peut pas résoudre (E5)."""
+        if self._systray:
+            try:
+                self._systray.set_state("error")
+            except Exception as e:
+                logger.debug("Systray indisponible : %s", e)
+        try:
+            from tools.notifier import notify
+
+            resultat = notify(message, title=f"Atlas — {titre}")
+            if asyncio.iscoroutine(resultat):
+                asyncio.ensure_future(resultat)
+        except Exception as e:
+            logger.error("[VOIX] Impossible d'afficher '%s' à l'écran : %s", titre, e)
+
+    def stt_status(self) -> dict:
+        """État réel de la transcription, pour /api/health (E4)."""
+        if self._cublas_available is None:
+            available, detail = ensure_cuda_libraries()
+        else:
+            available, detail = self._cublas_available, None
+        return {
+            "device_configured": self._config.get("stt_device", "cuda"),
+            "device_used": self._stt_device_used,     # None tant qu'aucune transcription
+            "cublas_available": bool(available),
+            "cuda_error": self._stt_error,
+            "model": self._config.get("stt_model", "base"),
+            "ok": bool(available) or self._stt_device_used == "cpu",
+            "detail": detail,
+        }
+
+    def wake_status(self) -> dict:
+        """État réel du mot d'éveil, pour /api/health (E4)."""
+        model_ref, is_path = self._resolve_wake_word_model()
+        present = pathlib.Path(model_ref).exists() if is_path else True
+        return {
+            "model": model_ref,
+            "model_present": present,
+            "loaded": self._wake_model is not None,
+            "threshold": self._wake_threshold,
+            "last_score": round(float(self._last_wake_score), 4),
+            "ok": present and self._wake_model is not None,
+        }
+
+    def tts_status(self) -> dict:
+        """État réel de la synthèse, pour /api/health (E4)."""
+        model_name = self._config.get("tts_voice", "fr_FR-siwis-medium")
+        model_path = (pathlib.Path(__file__).resolve().parent.parent
+                      / "data" / "voices" / f"{model_name}.onnx")
+        try:
+            import piper  # noqa: F401
+            piper_ok = model_path.exists()
+        except Exception:
+            piper_ok = False
+        try:
+            import pyttsx3  # noqa: F401
+            sapi_ok = True
+        except Exception:
+            sapi_ok = False
+        return {
+            "piper_ready": piper_ok,
+            "piper_model": str(model_path) if piper_ok else None,
+            "sapi_fallback_available": sapi_ok,
+            "backend_last_used": self._tts_backend,
+            "ok": piper_ok or sapi_ok,
+        }
 
     async def _run_text_pipeline(self, text: str) -> str:
         """Run existing text pipeline and return short spoken response."""
@@ -442,11 +608,32 @@ class VoiceEngine:
 
         summaries = []
         for item in results:
+            statut = item.get("status")
+            # E5 : une action qui exige une confirmation ne peut pas être confirmée à la
+            # voix aujourd'hui. Le pire serait de répondre « C'est fait » : c'est ce que
+            # faisait ce code, faute de message à résumer.
+            if statut == "confirmation_required":
+                raison = item.get("reason") or item.get("message") or ""
+                logger.warning("[VOIX] Confirmation impossible à la voix : %s", raison)
+                self._announce_on_screen(
+                    "Confirmation requise",
+                    f"{raison} Réponds à l'écran pour valider ou annuler.".strip(),
+                )
+                summaries.append(
+                    "Cette action nécessite une confirmation à l'écran. "
+                    "Je ne l'ai pas exécutée."
+                )
+                continue
+            if statut == "blocked":
+                summaries.append(item.get("message") or "Action refusée.")
+                continue
             res = item.get("result", {})
             if isinstance(res, dict):
                 msg = res.get("message", "")
             else:
                 msg = str(res)[:200]
+            if not msg and statut == "error":
+                msg = item.get("message") or "L'action a échoué."
             if msg:
                 summaries.append(msg)
 

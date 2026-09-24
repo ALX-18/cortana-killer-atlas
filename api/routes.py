@@ -437,12 +437,39 @@ async def api_health():
     except Exception:
         searxng_ok = False
 
+    # E4 / C04 : décrire ce que la voix sait FAIRE, pas la simple existence du composant.
+    # Avant, /api/health annonçait « running: true » alors que le mot d'éveil ne pouvait pas
+    # se déclencher, que la transcription plantait et que la synthèse était muette.
     voice_status = {"enabled": bool(cfg.get("voice", {}).get("enabled", False)), "running": False}
     try:
         voice = get_voice_engine()
         voice_status["running"] = bool(getattr(voice, "_running", False))
-    except Exception:
-        pass
+        wake, stt, tts = voice.wake_status(), voice.stt_status(), voice.tts_status()
+        raisons = []
+        if not wake["model_present"]:
+            raisons.append("modèle de mot d'éveil absent")
+        elif not wake["loaded"]:
+            raisons.append("mot d'éveil non chargé (moteur vocal arrêté)")
+        if not stt["cublas_available"]:
+            raisons.append("cuBLAS absent : transcription sur processeur, environ 5 s par phrase")
+        if stt.get("cuda_error"):
+            raisons.append(f"transcription GPU en échec : {stt['cuda_error']}")
+        if not tts["piper_ready"]:
+            raisons.append("voix Piper indisponible"
+                           + (" — repli sur la voix Windows" if tts["sapi_fallback_available"] else ""))
+        if tts.get("backend_last_used") == "sapi":
+            raisons.append("synthèse en repli SAPI")
+        if not tts["ok"]:
+            raisons.append("aucune synthèse vocale disponible")
+        voice_status.update({
+            "wake_word": wake,
+            "stt": stt,
+            "tts": tts,
+            "ok": bool(wake["ok"] and stt["ok"] and tts["ok"]),
+            "degraded_reason": raisons,
+        })
+    except Exception as e:
+        voice_status.update({"ok": False, "degraded_reason": [f"état de la voix illisible : {e}"]})
 
     # Tesseract OCR probe
     import subprocess as _sp
