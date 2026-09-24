@@ -13,16 +13,27 @@ C'est la seule étape qui prouve le produit. Tout le reste ne prouve que la logi
    complète, prononcée **à l'anglaise** (« hey » comme en anglais, « atlass »). Mesuré ce
    sprint : une voix anglaise marque 0,995, la même phrase en français 0,0008.
 2. Branche ton micro habituel et place-toi à **un mètre**, comme pour un usage normal.
-3. Lance Atlas :
+3. Lance Atlas **avec sa fenêtre** :
    ```
-   cd C:\Users\alexis\Cortana_Killer
-   .venv\Scripts\python.exe main.py
+   C:\Users\alexis\Cortana_Killer\start_atlas_desktop.bat
    ```
-4. Attends la ligne `VoiceEngine started.` puis `[VOIX] Transcription préchauffée en ...`.
-   Cette seconde ligne est importante : sans elle, la première commande sera lente d'une
-   dizaine de secondes.
-5. Vérifie l'état réel dans un navigateur : `http://localhost:8550/api/health`, section
-   `services.voice`. Attendu : `"ok": true` et `degraded_reason` vide.
+   (Ma première version de ce protocole lançait `main.py` seul, sans interface : c'était une
+   erreur de ma part.)
+4. Dans la fenêtre Atlas, regarde la carte **« Voix »**, dans la colonne de gauche. Le voyant
+   suit ce qu'Atlas fait, en direct :
+
+   | Couleur | État |
+   |---|---|
+   | bleu | au repos, il attend « Hey Atlas » |
+   | **vert** | **il écoute** |
+   | orange | il réfléchit |
+   | violet | il parle |
+   | rouge | problème — la cause est écrite juste en dessous |
+
+   L'icône de la zone de notification suit les mêmes couleurs, avec un anneau clair pendant
+   l'écoute.
+5. Attends la ligne `[VOIX] Transcription préchauffée en ...` dans la console. Sans elle, la
+   première commande sera lente d'une dizaine de secondes.
 
 ---
 
@@ -95,8 +106,15 @@ ou une vidéo — ton usage normal.
 1. Arrête Atlas (Ctrl+C dans la console, ou « Quitter » depuis la zone de notification).
 2. Donne-moi tes observations, même approximatives.
 
-Je récupérerai les journaux (`logs/atlas.log`) pour les mesures précises : scores du mot
-d'éveil, durées réelles de transcription, de réflexion et de synthèse, et nombre d'éveils.
+Je récupérerai les journaux (`logs/atlas.log`) pour les mesures précises. Depuis ta première
+séance, le moteur y écrit tout ce qu'il faut — il n'en gardait aucune trace jusque-là :
+
+```
+[VOIX] Mot d'éveil détecté (score=0.987, seuil=0.50) — j'écoute.
+[VOIX] Transcription (0.18s, cuda) : 'quelle heure il est'
+[VOIX] Cycle : écoute 2.4s + transcription 0.18s + réflexion 1.9s + parole 1.2s = 5.7s
+       depuis le mot d'éveil (moteur=piper) — réponse : '...'
+```
 
 ---
 
