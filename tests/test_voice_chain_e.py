@@ -154,6 +154,47 @@ def test_e2_transcription_gpu_sur_audio_reel(engine):
 
 
 # --------------------------------------------------------------------------- #
+#  E2 bis — les noms d'applications, gêne principale relevée par Alexis au micro
+# --------------------------------------------------------------------------- #
+
+COMMANDES_FR = [
+    ("cmd_discord_fr.wav", "discord"),
+    ("cmd_steam_fr.wav", "steam"),
+    ("cmd_opera_fr.wav", "opera"),
+]
+
+
+@pytest.mark.parametrize("fichier,attendu", COMMANDES_FR)
+def test_e2bis_nom_application_transcrit_correctement(engine, fichier, attendu):
+    """Séance au micro du 24/09 : « au péra » pour Opera, « stim » pour Steam,
+    « dix cordes » pour Discord. Mesuré ensuite : 2 noms corrects sur 5 sans
+    amorçage, 5 sur 5 quand la liste des applications connues est soufflée au modèle.
+    """
+    chemin = pathlib.Path(__file__).parent / "fixtures" / fichier
+    with wave.open(str(chemin), "rb") as w:
+        pcm = w.readframes(w.getnframes())
+
+    texte = asyncio.run(engine._transcribe(pcm))
+    normalise = texte.lower().replace("-", "").replace("é", "e").replace(" ", "")
+    assert attendu in normalise, (
+        f"nom d'application non reconnu : Atlas a compris {texte!r} au lieu de « {attendu} »"
+    )
+
+
+def test_e2bis_amorcage_ne_denature_pas_une_phrase_ordinaire(engine):
+    """Contrepartie : l'amorçage ne doit pas faire apparaître des noms d'applications
+    dans une phrase qui n'en contient pas."""
+    chemin = pathlib.Path(__file__).parent / "fixtures" / "cmd_conversation_fr.wav"
+    with wave.open(str(chemin), "rb") as w:
+        pcm = w.readframes(w.getnframes())
+
+    texte = asyncio.run(engine._transcribe(pcm)).lower()
+    assert any(f in texte for f in ("vas-tu", "va-tu", "vas tu", "va tu")), f"transcription : {texte!r}"
+    for parasite in ("steam", "discord", "opera", "spotify"):
+        assert parasite not in texte, f"l'amorçage a injecté « {parasite} » : {texte!r}"
+
+
+# --------------------------------------------------------------------------- #
 #  E5 — une action à confirmation, demandée à la voix
 # --------------------------------------------------------------------------- #
 
