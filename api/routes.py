@@ -408,6 +408,50 @@ async def get_recent_logs(limit: int = 50):
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {e}")
 
 
+_PROBE_CACHE: dict = {"ts": 0.0, "ollama": False, "searxng": False}
+_PROBE_TTL = 10.0
+
+
+@router.get("/voice/state")
+async def api_voice_state():
+    """État de la voix, sans aucune sonde réseau.
+
+    /api/health interroge Ollama et SearXNG à chaque appel : l'interroger toutes les deux
+    secondes pour suivre l'écoute saturait le backend (constaté par Alexis au sprint E).
+    Ce point d'accès ne lit que l'état en mémoire du moteur vocal.
+    """
+    from core.voice_engine import get_voice_engine
+
+    settings_path = pathlib.Path(__file__).resolve().parent.parent / "config" / "settings.json"
+    with open(settings_path, encoding="utf-8") as f:
+        enabled = bool(json.load(f).get("voice", {}).get("enabled", False))
+
+    try:
+        voice = get_voice_engine()
+        running = bool(getattr(voice, "_running", False))
+        wake, stt, tts = voice.wake_status(), voice.stt_status(), voice.tts_status()
+        raisons = []
+        if running and not wake["loaded"]:
+            raisons.append("mot d'éveil non chargé")
+        if not stt["cublas_available"]:
+            raisons.append("transcription sur processeur")
+        if not tts["ok"]:
+            raisons.append("aucune synthèse vocale")
+        return {
+            "enabled": enabled,
+            "running": running,
+            "activity": getattr(voice, "activity", None),
+            "ok": bool(running and wake["ok"] and stt["ok"] and tts["ok"]),
+            "degraded_reason": raisons,
+            "stt_device": stt["device_used"],
+            "tts_backend": tts["backend_last_used"],
+            "last_wake_score": wake["last_score"],
+        }
+    except Exception as e:
+        return {"enabled": enabled, "running": False, "ok": False,
+                "degraded_reason": [f"état illisible : {e}"]}
+
+
 @router.get("/health")
 async def api_health():
     """Global health for core dependencies and voice runtime."""
@@ -420,29 +464,65 @@ async def api_health():
     web_cfg = cfg.get("web", {})
     mem = get_memory_manager()
 
-    ollama_ok = False
-    searxng_ok = False
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            ollama_resp = await client.get("http://127.0.0.1:11434/api/tags")
-            ollama_ok = ollama_resp.status_code == 200
-    except Exception:
+    # Sprint E : sondes mises en cache 10 s. Sans cela, un rafraîchissement régulier de
+    # l'interface déclenchait un appel à Ollama et à SearXNG toutes les deux secondes.
+    now = time.monotonic()
+    if now - _PROBE_CACHE["ts"] < _PROBE_TTL:
+        ollama_ok = _PROBE_CACHE["ollama"]
+        searxng_ok = _PROBE_CACHE["searxng"]
+    else:
         ollama_ok = False
-
-    try:
-        searx_url = web_cfg.get("searxng_url", "http://localhost:8888")
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            sx_resp = await client.get(f"{searx_url}/search", params={"q": "atlas health", "format": "json"})
-            searxng_ok = sx_resp.status_code == 200
-    except Exception:
         searxng_ok = False
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                ollama_resp = await client.get("http://127.0.0.1:11434/api/tags")
+                ollama_ok = ollama_resp.status_code == 200
+        except Exception:
+            ollama_ok = False
 
+        try:
+            searx_url = web_cfg.get("searxng_url", "http://localhost:8888")
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                sx_resp = await client.get(f"{searx_url}/search", params={"q": "atlas health", "format": "json"})
+                searxng_ok = sx_resp.status_code == 200
+        except Exception:
+            searxng_ok = False
+        _PROBE_CACHE.update({"ts": now, "ollama": ollama_ok, "searxng": searxng_ok})
+
+    # E4 / C04 : décrire ce que la voix sait FAIRE, pas la simple existence du composant.
+    # Avant, /api/health annonçait « running: true » alors que le mot d'éveil ne pouvait pas
+    # se déclencher, que la transcription plantait et que la synthèse était muette.
     voice_status = {"enabled": bool(cfg.get("voice", {}).get("enabled", False)), "running": False}
     try:
         voice = get_voice_engine()
         voice_status["running"] = bool(getattr(voice, "_running", False))
-    except Exception:
-        pass
+        wake, stt, tts = voice.wake_status(), voice.stt_status(), voice.tts_status()
+        raisons = []
+        if not wake["model_present"]:
+            raisons.append("modèle de mot d'éveil absent")
+        elif not wake["loaded"]:
+            raisons.append("mot d'éveil non chargé (moteur vocal arrêté)")
+        if not stt["cublas_available"]:
+            raisons.append("cuBLAS absent : transcription sur processeur, environ 5 s par phrase")
+        if stt.get("cuda_error"):
+            raisons.append(f"transcription GPU en échec : {stt['cuda_error']}")
+        if not tts["piper_ready"]:
+            raisons.append("voix Piper indisponible"
+                           + (" — repli sur la voix Windows" if tts["sapi_fallback_available"] else ""))
+        if tts.get("backend_last_used") == "sapi":
+            raisons.append("synthèse en repli SAPI")
+        if not tts["ok"]:
+            raisons.append("aucune synthèse vocale disponible")
+        voice_status.update({
+            "activity": getattr(voice, "activity", None),
+            "wake_word": wake,
+            "stt": stt,
+            "tts": tts,
+            "ok": bool(wake["ok"] and stt["ok"] and tts["ok"]),
+            "degraded_reason": raisons,
+        })
+    except Exception as e:
+        voice_status.update({"ok": False, "degraded_reason": [f"état de la voix illisible : {e}"]})
 
     # Tesseract OCR probe
     import subprocess as _sp

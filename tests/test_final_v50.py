@@ -137,8 +137,16 @@ def test_05_execution_engine_breaks_recursive_replan(monkeypatch):
         async def replan(self, *args, **kwargs):
             return plan
 
+    async def _no_idempotence(self, tool_name, params, context):
+        return None
+
     monkeypatch.setattr(ie, "execute_tool", _always_error)
     monkeypatch.setattr(planner_mod, "get_planner", lambda: _DummyPlanner())
+    # Sprint E : ce test échouait quand le Bloc-notes tournait sur le poste. Le moteur
+    # considérait `launch_app notepad` comme déjà accompli, l'échec forcé n'avait donc pas
+    # lieu et le garde-fou anti-récursion n'était jamais atteint. Le test dépendait des
+    # processus ouverts sur la machine ; il n'en dépend plus.
+    monkeypatch.setattr(ie.ExecutionEngine, "_check_idempotence", _no_idempotence)
 
     results = asyncio.run(engine.execute_plan(plan, {"user_input": "test recursion"}))
     assert any(r.get("error_code") in {"ERR_RECURSION_DETECTED", "ERR_REPLAN_LIMIT"} for r in results)

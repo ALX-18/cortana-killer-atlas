@@ -49,6 +49,7 @@ class AtlasDesktop:
         self._apply_theme()
         self._tick_queue()
         self.refresh_health()
+        self.root.after(2000, self._poll_voice_state)
 
     def _load_api_base(self) -> str:
         with open(SETTINGS_PATH, encoding="utf-8") as f:
@@ -84,6 +85,20 @@ class AtlasDesktop:
         self.health_dot.pack(side="left", padx=(0, 6))
         self.health_text = ttk.Label(health_row, text="Checking...", style="Muted.TLabel")
         self.health_text.pack(side="left")
+
+        # Sprint E — demande d'Alexis : voir d'un coup d'oeil quand Atlas écoute.
+        voice_card = ttk.Frame(sidebar, style="Card.TFrame", padding=10)
+        voice_card.pack(fill="x", pady=(8, 0))
+        ttk.Label(voice_card, text="Voix", style="CardTitle.TLabel").pack(anchor="w")
+
+        voice_row = ttk.Frame(voice_card, style="Card.TFrame")
+        voice_row.pack(fill="x", pady=(8, 0))
+        self.voice_dot = tk.Canvas(voice_row, width=14, height=14, highlightthickness=0)
+        self.voice_dot.pack(side="left", padx=(0, 6))
+        self.voice_text = ttk.Label(voice_row, text="…", style="Muted.TLabel")
+        self.voice_text.pack(side="left")
+        self.voice_detail = ttk.Label(voice_card, text="", style="Muted.TLabel", wraplength=180)
+        self.voice_detail.pack(anchor="w", pady=(6, 0))
 
         self.status_text = ttk.Label(sidebar, text="Ready", style="Muted.TLabel")
         self.status_text.pack(anchor="w", pady=(12, 8))
@@ -170,6 +185,36 @@ class AtlasDesktop:
             insertbackground=self.colors["text"],
             relief="flat",
         )
+
+    # Sprint E : couleurs alignées sur celles de l'icône de la zone de notification.
+    VOICE_COLORS = {
+        "repos": "#4682b4", "écoute": "#2ecc71", "réfléchit": "#f39c12",
+        "parle": "#9b59b6", "arrêtée": "#7f8c8d", "problème": "#e74c3c",
+    }
+
+    def _set_voice_state(self, voice: dict):
+        """Affiche l'état réel de la voix : /api/health dit ce qu'Atlas sait faire."""
+        if voice is None:
+            etat, detail = "arrêtée", "backend indisponible (démarrage en cours ?)"
+        elif not isinstance(voice, dict) or not voice:
+            etat, detail = "problème", "état inconnu"
+        elif not voice.get("enabled"):
+            etat, detail = "arrêtée", "voix désactivée dans la configuration"
+        elif not voice.get("running"):
+            etat, detail = "arrêtée", "moteur vocal arrêté"
+        elif voice.get("ok"):
+            etat = voice.get("activity") or "repos"
+            stt = voice.get("stt", {}) or {}
+            detail = f"prête — dis « Hey Atlas » (transcription {stt.get('device_used') or '?'})"
+        else:
+            etat = "problème"
+            detail = " ; ".join(voice.get("degraded_reason") or ["cause inconnue"])[:160]
+
+        color = self.VOICE_COLORS.get(etat, self.VOICE_COLORS["problème"])
+        self.voice_dot.delete("all")
+        self.voice_dot.create_oval(2, 2, 12, 12, fill=color, outline=color)
+        self.voice_text.config(text=f"Atlas {etat}")
+        self.voice_detail.config(text=detail)
 
     def _set_health_dot(self, ok: bool):
         self.health_dot.delete("all")
@@ -285,6 +330,8 @@ class AtlasDesktop:
                     if ollama_ok is not None:
                         status_line += f" | Ollama: {'ok' if ollama_ok else 'down'}"
                     self.health_text.config(text=status_line)
+                elif role == "voice":
+                    self._set_voice_state(payload)
                 elif role == "atlas":
                     self._append("atlas", payload)
                 elif role == "system":
@@ -296,6 +343,28 @@ class AtlasDesktop:
         except queue.Empty:
             pass
         self.root.after(100, self._tick_queue)
+
+    def _poll_voice_state(self):
+        """Suit l'état de la voix toutes les 1,5 s, en silence.
+
+        Sprint E : ce suivi appelait /api/health, qui sonde Ollama et SearXNG à chaque fois.
+        Les appels s'empilaient et le fil se remplissait de « Health check failed ». On
+        interroge désormais /api/voice/state, qui ne lit que l'état en mémoire, et un échec
+        n'écrit rien dans la conversation.
+        """
+        base = self._load_api_base()
+
+        def _job():
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    r = client.get(f"{base}/api/voice/state")
+                    r.raise_for_status()
+                    self._messages.put(("voice", r.json()))
+            except Exception:
+                self._messages.put(("voice", None))   # backend pas encore prêt : silence
+
+        threading.Thread(target=_job, daemon=True).start()
+        self.root.after(1500, self._poll_voice_state)
 
     def _run_request(self, worker):
         t = threading.Thread(target=worker, daemon=True)

@@ -64,7 +64,7 @@ class AtlasSystray:
         if self._icon is not None:
             try:
                 self._icon.icon = self._build_icon(state)
-                self._icon.title = f"Atlas ({state})"
+                self._icon.title = f"Atlas — {self.STATE_LABELS.get(state, state)}"
             except Exception:
                 pass
 
@@ -115,18 +115,31 @@ class AtlasSystray:
             self._on_quit()
         self.stop()
 
+    # Sprint E : demande d'Alexis — savoir d'un coup d'oeil quand Atlas écoute.
+    STATE_COLORS = {
+        "idle": (70, 130, 180),          # bleu   — au repos
+        "listening": (46, 204, 113),     # vert   — il écoute
+        "processing": (243, 156, 18),    # orange — il réfléchit
+        "speaking": (155, 89, 182),      # violet — il parle
+        "error": (231, 76, 60),          # rouge  — problème
+    }
+    STATE_LABELS = {
+        "idle": "au repos",
+        "listening": "il écoute",
+        "processing": "il réfléchit",
+        "speaking": "il parle",
+        "error": "problème",
+    }
+
     def _build_icon(self, state: str):
-        """Build a small square icon with color by state."""
-        color_map = {
-            "idle": (70, 130, 180),
-            "listening": (46, 204, 113),
-            "processing": (243, 156, 18),
-            "error": (231, 76, 60),
-        }
-        color = color_map.get(state, color_map["idle"])
+        """Icône colorée selon l'état, avec un anneau marqué pendant l'écoute."""
+        color = self.STATE_COLORS.get(state, self.STATE_COLORS["idle"])
 
         image = self._PIL_Image.new("RGB", (64, 64), (25, 25, 30))
         draw = self._PIL_ImageDraw.Draw(image)
+        if state == "listening":
+            # Anneau clair : l'écoute doit se distinguer nettement du repos.
+            draw.ellipse((2, 2, 62, 62), outline=(245, 245, 245), width=4)
         draw.ellipse((10, 10, 54, 54), fill=color)
         draw.rectangle((28, 16, 36, 48), fill=(245, 245, 245))
         return image

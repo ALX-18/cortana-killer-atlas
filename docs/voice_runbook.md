@@ -1,4 +1,4 @@
-# Atlas Voice Runbook (v6.0.2 — F1 Voix Partie 1)
+# Atlas Voice Runbook (mis à jour au sprint E)
 
 ## Scope
 Démarrage et dépannage de la pile voix : wake word "Hey Atlas" (OpenWakeWord) →
@@ -31,6 +31,17 @@ bloquant, à reprendre quand ce sera la priorité (cf. RAPPORT_V602.md section 6
 4. Micro système fonctionnel et sélectionné comme périphérique d'entrée par défaut Windows.
 
 ## 1) Wake word retenu : hey_atlas
+
+> **À dire « Hey Atlas », pas « Atlas ».** Le modèle `hey_atlas.onnx` est entraîné sur
+> l'expression complète, prononcée **à l'anglaise**. Mesuré au sprint E sur le même
+> fichier audio : une voix anglaise disant « Hey Atlas » marque **0,995** ; la même phrase
+> par une voix française marque **0,0008**, soit aucun déclenchement. Si le mot d'éveil ne
+> réagit pas, c'est la première chose à vérifier — avant de toucher au seuil.
+
+> **Sprint E — le mot d'éveil était structurellement mort (L1).** `_wake_callback`
+> convertissait l'audio en float32 normalisé alors qu'openWakeWord attend du PCM int16.
+> Corrigé ; couvert par `tests/test_voice_chain_e.py`, qui fait passer un vrai WAV dans le
+> vrai code.
 
 Le brief de sprint citait un modèle "Atlas V2" avec FA/H=0.2 (audit S21). Le
 seul modèle "Hey Atlas" public et vérifiable trouvé pour ce sprint est
@@ -94,42 +105,75 @@ Recovery:
 
 ## 5) ERR_VOICE_GPU_MISSING (latence STT élevée)
 Symptoms:
-- Log au démarrage : `Atlas Voice : aucun GPU CUDA detecte. La transcription STT
-  sera lente (~3-5s).`
+- Log : `[VOIX] CUDA indisponible (...)` ou `Transcription sur 'cuda' impossible (...) — repli
+  processeur, la réponse sera nettement plus lente.`
+- `/api/health` → `services.voice.stt.cublas_available = false`.
 
 Checks:
 1. `nvidia-smi` (GPU détecté ?).
-2. `voice.stt_device` dans `config/settings.json` (actuellement `"cuda"`).
+2. `python scripts/doctor.py` → ligne « Bibliothèques CUDA pour la transcription ».
+3. `voice.stt_device` dans `config/settings.json` (actuellement `"cuda"`).
 
 Recovery:
-1. Sur poste sans GPU dédié : passer `stt_device` à `"cpu"` (latence plus élevée
-   mais fonctionnel).
-2. Sur RTX 3050 : vérifier les drivers CUDA à jour.
+1. `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` (déclarés dans `requirements.txt`).
+   Le CUDA Toolkit complet n'est **pas** nécessaire.
+2. Sur poste sans GPU dédié : passer `stt_device` à `"cpu"` (fonctionnel, ~5 s par phrase).
 
-## 6) ERR_VOICE_TTS_MODEL_MISSING
+**Mesures du sprint E** (RTX 5060, 8 Go) : transcription **0,1 à 0,2 s à chaud** sur GPU,
+contre environ 5 s sur processeur. Le **premier** appel après démarrage coûte une dizaine de
+secondes (chargement du modèle, noyaux CUDA, détecteur de voix) : il est désormais payé au
+démarrage, en tâche de fond (`_prewarm_stt`).
+
+**Note Blackwell :** CTranslate2 4.7.1 reconnaît la RTX 5060 (`get_cuda_device_count() = 1`,
+`float16` et `int8` disponibles). Aucune recompilation n'a été nécessaire.
+
+## 6) Synthèse vocale muette
 Symptoms:
 - Pas de réponse audio après une commande traitée avec succès (texte présent dans les logs).
-- Log : `Piper model not found: .../data/voices/fr_FR-siwis-medium.onnx`
+- Log : `[VOIX] Modèle Piper introuvable : ...` ou `[VOIX] Échec de la synthèse Piper (...)`.
 
 Checks:
 1. Vérifier `data/voices/fr_FR-siwis-medium.onnx` et `.onnx.json`.
+2. `/api/health` → `services.voice.tts` (`piper_ready`, `sapi_fallback_available`,
+   `backend_last_used`).
 
 Recovery:
 1. `python scripts/download_voice_models.py`
+2. En attendant, la voix de Windows prend le relais automatiquement (`pyttsx3`). Le repli est
+   **journalisé** (`[VOIX] Piper indisponible — repli sur la voix Windows (SAPI).`) et visible
+   dans `/api/health`.
+
+**Sprint E — pourquoi la voix était muette (L3) :** piper-tts ≥ 1.3 renvoie un itérable
+d'`AudioChunk`, le code attendait un tuple, et l'exception était avalée par un
+`except Exception: pass`. La version est désormais **épinglée** (`piper-tts==1.4.1`) et tout
+échec est journalisé.
 
 ## 7) Tests
 
 ```
-pytest tests/test_voice_v40.py tests/test_voice_v602.py -v
+pytest tests/test_voice_chain_e.py tests/test_voice_v40.py tests/test_voice_v602.py -v
 ```
+
+`tests/test_voice_chain_e.py` est le seul à prouver quelque chose sur la chaîne réelle : il
+fait passer un vrai WAV dans le vrai `_wake_callback` et le vrai modèle, transcrit sur GPU et
+appelle la vraie synthèse Piper. Rien n'y est simulé sauf le micro et le haut-parleur.
 
 `test_10_gpu_absent_warning_no_crash` (dans `test_voice_v40.py`) échoue sur macOS :
 il importe `main.py`, qui importe transitivement `tools/process_manager.py`
 (constantes `psutil.IDLE_PRIORITY_CLASS` etc., Windows uniquement). C'est une
 limitation d'environnement connue, pas une régression — attendu PASS sur Windows.
 
-## 8) Limites connues (v6.0.2 Partie 1)
+## 8) Limites connues
 - Pas d'interruption mid-speech (VAD pendant TTS) — prévu v6.1.
 - Wake word "Hey Atlas" est un modèle communautaire, pas entraîné spécifiquement
   pour ce projet — recall modeste (62% publié par l'auteur), à valider en conditions réelles.
 - Latence bout-en-bout non optimisée — mesure indicative uniquement ce sprint.
+
+## 9) Confirmation vocale (sprint E)
+
+Une action sensible (fermer une fenêtre, tuer un processus, commande PowerShell) demandée à
+la voix **n'est pas exécutée**. Atlas répond alors : « Cette action nécessite une confirmation
+à l'écran. Je ne l'ai pas exécutée. », affiche une notification Windows et le journalise.
+
+Répondre « oui » à la voix n'est **pas** implémenté : c'est un sujet de conception, analysé
+dans le rapport du sprint E.
