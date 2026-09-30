@@ -52,6 +52,33 @@ def ensure_cuda_libraries() -> tuple[bool, str]:
         else "cublas64_12.dll introuvable dans les paquets nvidia"
 
 
+# F3 — fenêtre de suite. Au micro (24/09), Alexis enchaînait ses questions dans les
+# secondes qui suivaient la réponse. Six secondes laissent le temps de réagir sans faire
+# d'Atlas un micro ouvert : passé ce délai, il faut redire « Hey Atlas ».
+FOLLOW_UP_SECONDS = 6.0
+
+# Plafond d'enchaînements sans mot d'éveil. Sans lui, une parole continue — une
+# télévision, une conversation voisine — rouvrirait la fenêtre indéfiniment et Atlas
+# répondrait à la pièce. Cinq échanges couvrent une conversation ; au-delà, « Hey Atlas ».
+MAX_FOLLOW_UPS = 5
+
+# Acquiescements nus. Ils ne valident JAMAIS une confirmation, ni dans la fenêtre de suite
+# ni après le mot d'éveil : la confirmation vocale exige une conception à part (liste
+# blanche, score de confiance, refus par défaut — rapport E, annexe A).
+_BARE_AFFIRMATIONS = {
+    "oui", "ouais", "ouai", "ok", "okay", "d'accord", "daccord", "vas-y", "vas y", "va-y",
+    "confirme", "je confirme", "confirmé", "valide", "je valide", "c'est bon", "go", "yes",
+    "oui vas-y", "ok vas-y", "oui oui", "oui confirme", "bien sûr", "allez",
+}
+
+
+def is_bare_affirmation(text: str) -> bool:
+    """« Oui. », « ok vas-y », « d'accord » : un acquiescement sans autre contenu."""
+    cleaned = re.sub(r"[.!?,;:…«»\"]", " ", (text or "").lower())
+    cleaned = " ".join(cleaned.replace("’", "'").split())
+    return cleaned in _BARE_AFFIRMATIONS
+
+
 def _load_voice_config() -> dict:
     cfg_path = pathlib.Path(__file__).resolve().parent.parent / "config" / "settings.json"
     with open(cfg_path, encoding="utf-8") as f:
@@ -140,7 +167,7 @@ class VoiceEngine:
 
     # Sprint E — demande d'Alexis : savoir quand Atlas écoute, dans la fenêtre comme dans
     # la zone de notification. Une seule source d'état pour les deux.
-    _ACTIVITY_LABELS = {"idle": "repos", "listening": "écoute",
+    _ACTIVITY_LABELS = {"idle": "repos", "listening": "écoute", "follow_up": "suite",
                         "processing": "réfléchit", "speaking": "parle"}
 
     def _set_activity(self, state: str) -> None:
@@ -313,8 +340,38 @@ class VoiceEngine:
             except Exception as e:
                 logger.debug("Wake processing error: %s", e)
 
+    def _drain_wake_audio(self) -> int:
+        """Jette l'audio capté pendant le cycle et remet le modèle d'éveil à zéro (F3).
+
+        Avant, ces trames attendaient dans la file : au retour au repos, Atlas les analysait
+        et se réveillait sur ce qu'il avait entendu en parlant — 17 réveils sur 29 au micro.
+        """
+        dropped = 0
+        while not self._wake_queue.empty():
+            try:
+                self._wake_queue.get_nowait()
+                dropped += 1
+            except Exception:
+                break
+        if self._wake_model is not None and hasattr(self._wake_model, "reset"):
+            try:
+                self._wake_model.reset()
+            except Exception as e:
+                logger.debug("Remise à zéro du modèle d'éveil impossible : %s", e)
+        if dropped:
+            logger.debug("[VOIX] %d trame(s) captée(s) pendant le cycle écartée(s).", dropped)
+        return dropped
+
+    def _confirmation_pending(self) -> bool:
+        try:
+            from core.intent_engine import list_pending_confirmations
+
+            return bool(list_pending_confirmations())
+        except Exception:
+            return False
+
     async def _on_wake_word(self):
-        """Wake-word callback pipeline."""
+        """Mot d'éveil → écoute → réponse → fenêtre de suite (F3), jusqu'au silence."""
         self._set_activity("listening")
 
         # E7 : sans ces traces, impossible de mesurer quoi que ce soit après une séance au
@@ -322,33 +379,66 @@ class VoiceEngine:
         t_wake = time.monotonic()
         logger.info("[VOIX] Mot d'éveil détecté (score=%.3f, seuil=%.2f) — j'écoute.",
                     self._last_wake_score, self._wake_threshold)
+        follow_up = False
+        follow_ups = 0
         try:
-            audio = await self._record_audio()
-            t_record = time.monotonic()
-            text = await self._transcribe(audio)
-            t_stt = time.monotonic()
-            logger.info("[VOIX] Transcription (%.2fs, %s) : %r",
-                        t_stt - t_record, self._stt_device_used, text)
+            while True:
+                t_start = time.monotonic()
+                if follow_up:
+                    audio = await self._record_audio(wait_for_speech=FOLLOW_UP_SECONDS)
+                else:
+                    audio = await self._record_audio()
+                t_record = time.monotonic()
+                text = (await self._transcribe(audio)) if audio else ""
+                t_stt = time.monotonic()
 
-            if not text.strip():
-                await self._speak("Je n'ai rien entendu.")
-                logger.info("[VOIX] Cycle terminé sans transcription — total %.1fs",
-                            time.monotonic() - t_wake)
-                return
+                if follow_up and not text.strip():
+                    logger.info("[VOIX] Fenêtre de suite close (%.1fs sans parole) — retour au mot d'éveil.",
+                                t_record - t_start)
+                    break
+                logger.info("[VOIX] Transcription%s (%.2fs, %s) : %r", " (fenêtre de suite)" if follow_up else "",
+                            t_stt - t_record, self._stt_device_used, text)
+                if not text.strip():
+                    await self._speak("Je n'ai rien entendu.")
+                    logger.info("[VOIX] Cycle terminé sans transcription — total %.1fs",
+                                time.monotonic() - t_wake)
+                    break
 
-            self._set_activity("processing")
+                if is_bare_affirmation(text) and self._confirmation_pending():
+                    # F3 : jamais de confirmation à la voix, dans la fenêtre de suite ni ailleurs.
+                    logger.warning("[VOIX] « %s » entendu alors qu'une confirmation attend : "
+                                   "refusé, la confirmation se fait à l'écran.", text)
+                    self._set_activity("speaking")
+                    await self._speak("Je ne valide pas de confirmation à la voix : "
+                                      "réponds à l'écran, dans la fenêtre Atlas.")
+                else:
+                    self._set_activity("processing")
+                    response_text = await self._run_text_pipeline(text)
+                    t_think = time.monotonic()
+                    self._set_activity("speaking")
+                    await self._speak(response_text)
+                    t_speak = time.monotonic()
+                    logger.info(
+                        "[VOIX] Cycle%s : écoute %.1fs + transcription %.2fs + réflexion %.1fs + "
+                        "parole %.1fs = %.1fs (moteur=%s) — réponse : %r",
+                        " (suite)" if follow_up else "",
+                        t_record - t_start, t_stt - t_record, t_think - t_stt, t_speak - t_think,
+                        t_speak - t_start, self._tts_backend, response_text[:120],
+                    )
 
-            response_text = await self._run_text_pipeline(text)
-            t_think = time.monotonic()
-            self._set_activity("speaking")
-            await self._speak(response_text)
-            t_speak = time.monotonic()
-            logger.info(
-                "[VOIX] Cycle : écoute %.1fs + transcription %.2fs + réflexion %.1fs + "
-                "parole %.1fs = %.1fs depuis le mot d'éveil (moteur=%s) — réponse : %r",
-                t_record - t_wake, t_stt - t_record, t_think - t_stt, t_speak - t_think,
-                t_speak - t_wake, self._tts_backend, response_text[:120],
-            )
+                # F3 : vider APRÈS la parole, puis ouvrir la fenêtre de suite — sauf si le
+                # moteur s'arrête ou si le plafond d'enchaînements est atteint.
+                self._drain_wake_audio()
+                if not self._running:
+                    break
+                if follow_ups >= MAX_FOLLOW_UPS:
+                    logger.info("[VOIX] %d échanges enchaînés : retour au mot d'éveil.", follow_ups)
+                    break
+                follow_ups += 1
+                follow_up = True
+                self._set_activity("follow_up")
+                logger.info("[VOIX] Fenêtre de suite ouverte : %.0f s pour enchaîner sans « Hey Atlas ».",
+                            FOLLOW_UP_SECONDS)
         except Exception as e:
             logger.error("Voice pipeline error: %s", e, exc_info=True)
             if self._systray:
@@ -358,13 +448,18 @@ class VoiceEngine:
             except Exception:
                 pass
         finally:
+            self._drain_wake_audio()
             self._set_activity("idle")
 
-    async def _record_audio(self) -> bytes:
-        """Record mic input until silence or max duration, returns PCM16 bytes."""
-        return await asyncio.to_thread(self._record_audio_sync)
+    async def _record_audio(self, wait_for_speech: Optional[float] = None) -> bytes:
+        """Record mic input until silence or max duration, returns PCM16 bytes.
 
-    def _record_audio_sync(self) -> bytes:
+        F3 : `wait_for_speech` borne l'attente du DÉBUT de parole (fenêtre de suite). Sans
+        parole dans ce délai, l'écoute s'arrête et renvoie un audio vide.
+        """
+        return await asyncio.to_thread(self._record_audio_sync, wait_for_speech)
+
+    def _record_audio_sync(self, wait_for_speech: Optional[float] = None) -> bytes:
         import sounddevice as sd
 
         sample_rate = 16000
@@ -379,8 +474,12 @@ class VoiceEngine:
         silent_chunks = 0
         speech_seen = False
 
+        wait_chunks = int(wait_for_speech / 0.1) if wait_for_speech else None
+
         with sd.InputStream(samplerate=sample_rate, channels=1, dtype="int16", blocksize=chunk_samples) as stream:
-            for _ in range(max_chunks):
+            for index in range(max_chunks):
+                if wait_chunks is not None and not speech_seen and index >= wait_chunks:
+                    return b""
                 data, _ = stream.read(chunk_samples)
                 chunk = np.array(data, dtype=np.int16).reshape(-1)
                 chunks.append(chunk)
