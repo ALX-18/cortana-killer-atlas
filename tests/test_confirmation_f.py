@@ -230,3 +230,21 @@ def test_f2_voix_fermer_une_fenetre_annonce_la_confirmation(executed, monkeypatc
     assert "confirmation" in reponse.lower() and "écran" in reponse.lower(), reponse
     assert affiche, "rien n'est affiché à l'écran"
     assert len(confirmation._pending) == 1, "la confirmation doit rester en attente pour la fenêtre"
+
+
+# --------------------------------------------------------------------------- #
+#  Audit F1 — suppressions définitives hors de toute intention
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("tool,args", [
+    ("maintenance_empty_bin", {}),
+    ("schedule_remove", {"job_id": "tache-d-alexis"}),
+])
+def test_f2_une_suppression_definitive_attend_la_confirmation_meme_hors_intention(executed, tool, args):
+    """Aucune intention ne produit ces outils aujourd'hui, et les automatisations les
+    excluent. Mais le moteur ne doit pas compter là-dessus : s'ils lui parviennent — une
+    intention ajoutée demain, un appel direct — vider la corbeille ou effacer une tâche
+    d'Alexis ne se fait pas sans son accord (invariant 4)."""
+    result = asyncio.run(ie.execute_tool(tool, args, CONTEXT))
+    assert executed == [], f"{tool} exécuté sans confirmation : {executed}"
+    assert result.get("status") == "confirmation_required", result

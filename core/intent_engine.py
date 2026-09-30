@@ -55,7 +55,7 @@ CONFIRMATION_TTL_S = 60.0
 
 
 def _confirmation_target(tool_name: str, args: dict) -> str:
-    for key in ("title", "name", "url", "workflow_id", "command", "action"):
+    for key in ("title", "name", "url", "workflow_id", "job_id", "command", "action"):
         value = (args or {}).get(key)
         if value:
             return str(value)

@@ -147,6 +147,10 @@ CONFIRMATION_POLICY: dict[str, tuple[str, str]] = {
     "system_config":   ("toujours", "une modification de la configuration du système"),
     "window_close":    ("toujours", "fermer une fenêtre peut faire perdre le travail non enregistré"),
     "browser_open":    ("toujours", "ouvrir une adresse externe"),
+    # Audit F1 : aucune intention ne les produit aujourd'hui, mais le moteur ne s'en remet
+    # pas à cette absence — une suppression définitive attend toujours l'accord d'Alexis.
+    "maintenance_empty_bin": ("toujours", "vider la corbeille efface définitivement son contenu"),
+    "schedule_remove": ("toujours", "supprimer une tâche planifiée d'Alexis"),
     "schedule_add":    ("interactif", "créer une tâche qui se rejouera seule"),
     "trigger_add":     ("interactif", "créer un déclencheur automatique"),
     "workflow_create": ("interactif", "créer un workflow"),

@@ -264,6 +264,8 @@ class AtlasDesktop:
         "run_powershell": "Exécuter la commande PowerShell",
         "system_config": "Modifier le système",
         "browser_open": "Ouvrir l'adresse",
+        "maintenance_empty_bin": "Vider la corbeille",
+        "schedule_remove": "Supprimer la tâche planifiée",
         "schedule_add": "Créer la tâche planifiée",
         "trigger_add": "Créer le déclencheur",
         "workflow_create": "Créer le workflow",
