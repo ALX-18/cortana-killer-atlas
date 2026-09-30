@@ -10,7 +10,7 @@ import pathlib
 import time
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi import Body
 from fastapi.responses import StreamingResponse
 import httpx
@@ -370,21 +370,52 @@ async def chat_stream_endpoint(req: ChatRequest):
 #  Confirmation
 # --------------------------------------------------------------------------- #
 
+def _origines_atlas() -> set[str]:
+    settings_path = pathlib.Path(__file__).resolve().parent.parent / "config" / "settings.json"
+    try:
+        with open(settings_path, encoding="utf-8") as f:
+            port = json.load(f).get("server", {}).get("port", 8550)
+    except Exception:
+        port = 8550
+    return {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+
+
+def _refuser_si_autre_origine(request: Request | None) -> None:
+    """Seule Alexis confirme : la fenêtre Atlas, ou l'interface web servie par Atlas.
+
+    Audit F1 : main.py accepte toutes les origines (CORS « * »). N'importe quelle page
+    ouverte dans le navigateur pouvait demander une action à /api/chat, lire l'identifiant
+    de confirmation dans la réponse, et la valider elle-même ici. Un navigateur envoie
+    toujours l'en-tête Origin sur une requête d'une autre origine ; la fenêtre desktop
+    (httpx) n'en envoie aucun. Une origine étrangère est donc refusée.
+    """
+    if request is None:
+        return
+    origine = request.headers.get("origin")
+    if origine and origine.rstrip("/") not in _origines_atlas():
+        logger.warning("[CONFIRMATION] Requête refusée depuis l'origine « %s » : "
+                       "seule la fenêtre Atlas confirme.", origine)
+        raise HTTPException(status_code=403,
+                            detail="Les confirmations ne se donnent que depuis Atlas.")
+
+
 @router.get("/confirmations")
-async def list_confirmations():
+async def list_confirmations(request: Request = None):
     """Confirmations en attente, y compris celles demandées à la voix (F2).
 
     La fenêtre Atlas interroge cette route : sans elle, une confirmation demandée à la
     voix n'apparaissait nulle part, et l'action restait bloquée sans que personne le sache.
     """
+    _refuser_si_autre_origine(request)
     from core.intent_engine import list_pending_confirmations
 
     return {"pending": list_pending_confirmations()}
 
 
 @router.post("/confirm")
-async def confirm_endpoint(req: ConfirmationResponse):
+async def confirm_endpoint(req: ConfirmationResponse, request: Request = None):
     """Confirme ou rejette une action en attente."""
+    _refuser_si_autre_origine(request)
     context = collect_context()
 
     if not req.accepted:

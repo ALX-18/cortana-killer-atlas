@@ -248,3 +248,62 @@ def test_f2_une_suppression_definitive_attend_la_confirmation_meme_hors_intentio
     result = asyncio.run(ie.execute_tool(tool, args, CONTEXT))
     assert executed == [], f"{tool} exécuté sans confirmation : {executed}"
     assert result.get("status") == "confirmation_required", result
+
+
+# --------------------------------------------------------------------------- #
+#  Audit F1 — seule Alexis confirme : pas une page web ouverte dans le navigateur
+# --------------------------------------------------------------------------- #
+
+PAGE_HOSTILE = {"Origin": "https://page-quelconque.example"}
+
+
+@pytest.fixture
+def api_client():
+    """Le vrai routeur, sans le démarrage complet d'Atlas (pas de micro, pas de mémoire)."""
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.testclient import TestClient
+
+    import api.routes as routes
+
+    app = FastAPI()
+    # Même réglage que main.py : toutes les origines sont acceptées par le navigateur.
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                       allow_methods=["*"], allow_headers=["*"])
+    app.include_router(routes.router, prefix="/api")
+    return TestClient(app)
+
+
+def test_f2_une_page_web_ne_peut_pas_valider_une_confirmation(executed, api_client):
+    """main.py accepte toutes les origines (CORS « * »). Une page ouverte dans le navigateur
+    pouvait donc demander une action à /api/chat, lire l'identifiant de confirmation dans la
+    réponse, puis la valider elle-même sur /api/confirm — sans un clic d'Alexis."""
+    _, attente = _run("window_mgmt", "close", target="bloc-notes")
+    cid = attente["confirmation_id"]
+
+    r = api_client.post("/api/confirm", json={"confirmation_id": cid, "accepted": True},
+                        headers=PAGE_HOSTILE)
+    assert executed == [], f"une page web a validé la confirmation : {executed}"
+    assert r.status_code == 403, f"{r.status_code} {r.text[:200]}"
+    assert cid in confirmation._pending, "la demande doit rester pendante pour Alexis"
+
+
+def test_f2_une_page_web_ne_voit_pas_les_confirmations(executed, api_client):
+    _run("window_mgmt", "close", target="bloc-notes")
+    r = api_client.get("/api/confirmations", headers=PAGE_HOSTILE)
+    assert r.status_code == 403, f"{r.status_code} {r.text[:200]}"
+
+
+@pytest.mark.parametrize("entetes", [
+    {},                                          # fenêtre desktop (httpx : pas d'en-tête Origin)
+    {"Origin": "http://127.0.0.1:8550"},         # interface web servie par Atlas
+    {"Origin": "http://localhost:8550"},
+])
+def test_f2_la_fenetre_atlas_confirme_toujours(executed, api_client, entetes):
+    _, attente = _run("window_mgmt", "close", target="bloc-notes")
+    liste = api_client.get("/api/confirmations", headers=entetes)
+    assert liste.status_code == 200 and len(liste.json()["pending"]) == 1
+    r = api_client.post("/api/confirm", json={"confirmation_id": attente["confirmation_id"],
+                                              "accepted": True}, headers=entetes)
+    assert r.status_code == 200, r.text[:200]
+    assert executed == [("window_close", {"title": "bloc-notes"})]
