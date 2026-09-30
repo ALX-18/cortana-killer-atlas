@@ -187,6 +187,22 @@ async def chat_endpoint(req: ChatRequest):
                 "candidates": r.get("candidates", []),
             }
 
+    # F2 : une action en attente de confirmation doit le DIRE à la fenêtre. Avant, le
+    # résumé ne trouvait aucun message, renvoyait None, et la fenêtre affichait
+    # « Action executee. » — une confirmation invisible, pendante pour toujours.
+    for r in results:
+        if r.get("status") == "confirmation_required":
+            return {
+                "type": "confirmation_required",
+                "confirmation_id": r.get("confirmation_id"),
+                "action": r.get("action") or r.get("tool"),
+                "target": r.get("target"),
+                "level": r.get("level"),
+                "expires_in": r.get("expires_in"),
+                "message": f"Confirmation requise : {r.get('reason') or 'action sensible'}.",
+                "tool_results": results,
+            }
+
     # Build response message
     summaries = []
     for r in results:
@@ -354,15 +370,28 @@ async def chat_stream_endpoint(req: ChatRequest):
 #  Confirmation
 # --------------------------------------------------------------------------- #
 
+@router.get("/confirmations")
+async def list_confirmations():
+    """Confirmations en attente, y compris celles demandées à la voix (F2).
+
+    La fenêtre Atlas interroge cette route : sans elle, une confirmation demandée à la
+    voix n'apparaissait nulle part, et l'action restait bloquée sans que personne le sache.
+    """
+    from core.intent_engine import list_pending_confirmations
+
+    return {"pending": list_pending_confirmations()}
+
+
 @router.post("/confirm")
 async def confirm_endpoint(req: ConfirmationResponse):
     """Confirme ou rejette une action en attente."""
     context = collect_context()
 
     if not req.accepted:
-        # Sauvegarder le refus comme correction en mémoire
-        from core.confirmation import get_pending
-        pending = get_pending(req.confirmation_id)
+        # Sauvegarder le refus comme correction en mémoire. F2 : l'attente est retirée
+        # (resolve_pending) ; avant, un refus la laissait pendante.
+        from core.confirmation import resolve_pending
+        pending = resolve_pending(req.confirmation_id)
         if pending:
             save_rejection(
                 req.confirmation_id,

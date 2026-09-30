@@ -125,8 +125,44 @@ _BROWSER_PROCESSES = {
     "brave.exe", "vivaldi.exe", "chromium.exe",
 }
 
-# Destructive actions
-_DESTRUCTIVE_VERBS = {"close", "kill", "shutdown", "restart"}
+# --------------------------------------------------------------------------- #
+#  F2 — LA source de vérité de la confirmation
+#
+#  Avant le sprint F, deux endroits en décidaient : le drapeau posé ici, et une liste
+#  codée en dur dans `execute_tool` (kill_process, run_powershell, system_config). Le
+#  moteur ne lisait que la sienne : fermer une fenêtre ou créer une tâche planifiée,
+#  marqués « à confirmer » ici, s'exécutaient sans rien demander (sprint E, R04).
+#
+#  Désormais cette table est la seule. Le validateur en dérive son drapeau ; le moteur
+#  l'applique. Deux portées :
+#    - « toujours »   : quel que soit l'appelant (demande, plan, automatisation, rejeu) ;
+#    - « interactif » : quand l'utilisateur le demande. Une tâche planifiée qui lance un
+#      workflow a été confirmée à sa création ; personne ne peut confirmer à 3 h du matin.
+#  Les actions « toujours » restent exclues des automatisations (B1-ter).
+# --------------------------------------------------------------------------- #
+
+CONFIRMATION_POLICY: dict[str, tuple[str, str]] = {
+    "kill_process":    ("toujours", "arrêter un processus peut faire perdre le travail en cours"),
+    "run_powershell":  ("toujours", "une commande système arbitraire"),
+    "system_config":   ("toujours", "une modification de la configuration du système"),
+    "window_close":    ("toujours", "fermer une fenêtre peut faire perdre le travail non enregistré"),
+    "browser_open":    ("toujours", "ouvrir une adresse externe"),
+    "schedule_add":    ("interactif", "créer une tâche qui se rejouera seule"),
+    "trigger_add":     ("interactif", "créer un déclencheur automatique"),
+    "workflow_create": ("interactif", "créer un workflow"),
+    "workflow_run":    ("interactif", "lancer un workflow, soit plusieurs actions d'un coup"),
+}
+
+
+def confirmation_reason(tool_name: str, *, interactive: bool) -> Optional[str]:
+    """Motif de confirmation de l'outil, ou None s'il n'en exige pas dans ce contexte."""
+    rule = CONFIRMATION_POLICY.get(tool_name)
+    if rule is None:
+        return None
+    scope, reason = rule
+    if scope == "interactif" and not interactive:
+        return None
+    return reason
 
 # --------------------------------------------------------------------------- #
 #  B1 / L5 — touches autorisées pour window_hotkey
@@ -488,7 +524,6 @@ class Validator:
 
         # --- Contexte-aware resolution ---
         params = dict(intent.params)
-        confirmation = verb in _DESTRUCTIVE_VERBS
         verification = VerificationRule()
         fallback = None
 
@@ -528,7 +563,6 @@ class Validator:
                                         "Précise la fenêtre, par exemple « ferme le bloc-notes ».")
                 tool_name = "window_close"
                 params = {"title": title}
-                confirmation = True
 
             elif verb in ("minimize", "maximize", "focus"):
                 if target:
@@ -714,9 +748,7 @@ class Validator:
                 params = click_params
 
         # --- Process specializations ---
-        elif category == "process":
-            if verb == "kill":
-                confirmation = True
+        # (la confirmation de kill_process est décidée par CONFIRMATION_POLICY)
 
         # --- Automation specializations ---
         elif category == "automation":
@@ -731,40 +763,35 @@ class Validator:
                     return self._reject(intent, f"automatisation refusée ({error})")
             if verb == "schedule":
                 tool_name = "schedule_add"
-                confirmation = True
                 verification = VerificationRule(type="none")
                 params.setdefault("trigger_type", "interval")
                 params.setdefault("trigger_config", {"hours": 24})
                 params.setdefault("actions", [])
             elif verb == "trigger":
                 tool_name = "trigger_add"
-                confirmation = True
                 verification = VerificationRule(type="none")
             elif verb == "workflow":
                 tool_name = "workflow_run"
-                confirmation = True
                 verification = VerificationRule(type="none")
             elif verb == "workflow_create":
                 tool_name = "workflow_create"
-                confirmation = True
                 verification = VerificationRule(type="none")
             elif verb == "workflow_list":
                 tool_name = "workflow_list"
-                confirmation = False
                 verification = VerificationRule(type="none")
             elif verb == "schedule_list":
                 tool_name = "schedule_list"
-                confirmation = False
                 verification = VerificationRule(type="none")
             elif verb == "schedule_run_now":
                 tool_name = "schedule_run_now"
-                confirmation = False
                 verification = VerificationRule(type="none")
 
         return ResolvedAction(
             tool=tool_name,
             params=params,
-            confirmation_required=confirmation,
+            # F2 : dérivée de CONFIRMATION_POLICY, la seule source de vérité. Le moteur
+            # applique la même table ; aucune autre liste ne décide.
+            confirmation_required=confirmation_reason(tool_name, interactive=True) is not None,
             verification=verification,
             fallback=fallback,
             intent=intent,

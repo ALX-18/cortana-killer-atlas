@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from core.confirmation import needs_confirmation, store_pending, classify_process
+from core.validator import confirmation_reason
 from core.memory_manager import get_memory_manager
 from tools import (
     process_manager,
@@ -40,6 +41,106 @@ BROWSER_PROCESSES = [
     "chrome.exe", "firefox.exe", "opera.exe", "msedge.exe",
     "brave.exe", "vivaldi.exe", "chromium.exe",
 ]
+
+
+# --------------------------------------------------------------------------- #
+#  F2 — confirmation : une seule décision (core/validator.CONFIRMATION_POLICY)
+# --------------------------------------------------------------------------- #
+
+# Délai de réponse. Assez long pour lire la demande et cliquer — au micro, Alexis entend
+# « confirmation à l'écran » et se tourne vers la fenêtre, qui interroge l'API toutes
+# les 1,5 s. Assez court pour qu'une demande oubliée ne s'exécute jamais hors contexte :
+# une minute plus tard, la fenêtre visée n'est peut-être plus celle que l'on croit.
+CONFIRMATION_TTL_S = 60.0
+
+
+def _confirmation_target(tool_name: str, args: dict) -> str:
+    for key in ("title", "name", "url", "workflow_id", "command", "action"):
+        value = (args or {}).get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def purge_expired_confirmations() -> list[str]:
+    """Retire les confirmations expirées : sans réponse, c'est un refus."""
+    from core.confirmation import _pending, resolve_pending
+
+    now = time.time()
+    expired = [cid for cid, item in list(_pending.items())
+               if item.get("expires_at") is not None and item["expires_at"] <= now]
+    for cid in expired:
+        item = resolve_pending(cid) or {}
+        logger.warning("[CONFIRMATION] %s (%s → %s) expirée sans réponse — refus par défaut, rien exécuté.",
+                       cid, item.get("tool"), item.get("target"))
+    return expired
+
+
+def list_pending_confirmations() -> list[dict]:
+    """Confirmations en attente, pour la fenêtre Atlas (y compris celles demandées à la voix)."""
+    from core.confirmation import _pending
+
+    purge_expired_confirmations()
+    now = time.time()
+    return [
+        {
+            "confirmation_id": cid,
+            "action": item.get("tool"),
+            "target": item.get("target"),
+            "reason": item.get("reason"),
+            "level": item.get("level"),
+            "expires_in": max(0, int(item["expires_at"] - now)),
+        }
+        for cid, item in list(_pending.items())
+        if item.get("expires_at") is not None
+    ]
+
+
+def request_confirmation(tool_name: str, args: dict, context: dict, reason: str) -> dict[str, Any]:
+    """Met l'action en attente de confirmation — ou la refuse si elle vise un processus système.
+
+    Décision d'Alexis (sprint F) : un processus système critique (liste always_protected)
+    n'est jamais arrêté, même confirmé. Un clic de trop peut faire planter Windows.
+    """
+    from core.confirmation import ALWAYS_PROTECTED
+
+    purge_expired_confirmations()
+    target = _confirmation_target(tool_name, args)
+    level, detail, suggestion = "🟡 DEMANDE", reason, None
+    if tool_name == "kill_process":
+        conf = needs_confirmation(tool_name, args, context) or {}
+        target = str(conf.get("target") or target)
+        if target.lower() in ALWAYS_PROTECTED:
+            logger.warning("[CONFIRMATION] Refus : « %s » est un processus système protégé.", target)
+            return {
+                "status": "error",
+                "error_code": "ERR_PROTECTED_PROCESS",
+                "message": f"Refusé : « {target} » est un processus système protégé. "
+                           "Atlas ne l'arrêtera pas, même avec une confirmation.",
+            }
+        level = conf.get("level", level)
+        detail = conf.get("reason", reason)
+        suggestion = conf.get("suggestion")
+
+    now = time.time()
+    confirmation_id = str(uuid.uuid4())[:8]
+    store_pending(confirmation_id, tool_name, args, {
+        "reason": detail, "level": level, "target": target, "suggestion": suggestion,
+        "created_at": now, "expires_at": now + CONFIRMATION_TTL_S,
+    })
+    logger.info("[CONFIRMATION] %s → « %s » en attente (%s), expire dans %ds : %s",
+                tool_name, target, confirmation_id, int(CONFIRMATION_TTL_S), detail)
+    return {
+        "status": "confirmation_required",
+        "confirmation_id": confirmation_id,
+        "action": tool_name,
+        "target": target,
+        "reason": detail,
+        "level": level,
+        "suggestion": suggestion,
+        "expires_in": int(CONFIRMATION_TTL_S),
+        "error_code": "ERR_CONFIRMATION_REQUIRED",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -527,6 +628,13 @@ class ExecutionEngine:
         # Special: conversation → no execution
         if tool_name == "__conversation__":
             return {"status": "conversation", "message": params.get("message", "")}
+
+        # F2 : le moteur honore la décision du validateur, pour TOUTES les actions. Avant,
+        # il n'appliquait qu'une liste à lui (trois outils) : fermer une fenêtre ou créer
+        # une tâche planifiée passaient sans rien demander (sprint E, R04).
+        if getattr(resolved, "confirmation_required", False):
+            reason = confirmation_reason(tool_name, interactive=True) or "action sensible"
+            return request_confirmation(tool_name, params, context, reason)
 
         # F4 v6.0 — apprentissage erreurs : mitigation pré-action (skip_layer appris)
         learned_mitigation = None
@@ -1148,63 +1256,12 @@ async def execute_tool(tool_name: str, args: dict, context: dict) -> dict[str, A
             "error_code": "ERR_UNKNOWN_TOOL",
         }
 
-    # Confirmation stricte pour actions sensibles (même en mode automatique)
-    if tool_name == "kill_process" or (
-        tool_name == "system_config" and str(args.get("action", "")).lower() in {"shutdown", "restart", "hibernate", "sleep"}
-    ):
-        conf = needs_confirmation(tool_name, args, context)
-        confirmation_id = str(uuid.uuid4())[:8]
-        conf = conf or {
-            "reason": "Action sensible.",
-            "level": "🟡 DEMANDE",
-            "target": args.get("name") or args.get("action") or "system",
-            "suggestion": "Confirmation obligatoire.",
-        }
-        store_pending(confirmation_id, tool_name, args, conf)
-        return {
-            "status": "confirmation_required",
-            "confirmation_id": confirmation_id,
-            "reason": conf["reason"],
-            "level": conf["level"],
-            "suggestion": conf.get("suggestion"),
-            "target": conf.get("target"),
-            "error_code": "ERR_CONFIRMATION_REQUIRED",
-        }
-
-    # Forcer la confirmation avant toute navigation externe (browser_open legacy)
-    if tool_name == "browser_open":
-        target_url = args.get("url", "")
-        confirmation_id = str(uuid.uuid4())[:8]
-        conf = {
-            "reason": f"Ouverture du navigateur vers : {target_url}",
-            "level": "🟡 DEMANDE",
-            "target": target_url,
-            "suggestion": "Confirmez-vous l'ouverture de cette URL externe ?",
-        }
-        store_pending(confirmation_id, tool_name, args, conf)
-        return {
-            "status": "confirmation_required",
-            "confirmation_id": confirmation_id,
-            "reason": conf["reason"],
-            "level": conf["level"],
-            "suggestion": conf.get("suggestion"),
-            "target": conf.get("target"),
-        }
-
-    # Vérifier si confirmation nécessaire
-    conf = needs_confirmation(tool_name, args, context)
-    if conf:
-        confirmation_id = str(uuid.uuid4())[:8]
-        store_pending(confirmation_id, tool_name, args, conf)
-        return {
-            "status": "confirmation_required",
-            "confirmation_id": confirmation_id,
-            "reason": conf["reason"],
-            "level": conf["level"],
-            "suggestion": conf.get("suggestion"),
-            "target": conf.get("target"),
-            "error_code": "ERR_CONFIRMATION_REQUIRED",
-        }
+    # F2 : la même table que le validateur (CONFIRMATION_POLICY), portée « toujours ».
+    # Ce chemin sert aussi aux automatisations et aux rejeux : une action « interactive »
+    # (lancer un workflow) y a déjà été confirmée à la création de l'automatisation.
+    reason = confirmation_reason(tool_name, interactive=False)
+    if reason:
+        return request_confirmation(tool_name, args, context, reason)
 
     # Exécuter directement
     try:
@@ -1443,10 +1500,23 @@ async def execute_confirmed(confirmation_id: str, context: dict) -> dict[str, An
 
     pending = resolve_pending(confirmation_id)
     if not pending:
-        return {"status": "error", "message": "Confirmation expirée ou invalide."}
+        return {"status": "error", "message": "Confirmation inconnue ou déjà traitée : rien n'a été fait."}
 
     tool_name = pending["tool"]
     args = pending["args"]
+
+    # F2 : sans réponse dans le délai, c'est un refus — jamais une exécution tardive.
+    expires_at = pending.get("expires_at")
+    if expires_at is not None and time.time() > expires_at:
+        logger.warning("[CONFIRMATION] %s (%s) validée après expiration — refusée.", confirmation_id, tool_name)
+        return {"status": "expired", "message": "Confirmation expirée : rien n'a été fait."}
+
+    if tool_name == "kill_process":
+        from core.confirmation import ALWAYS_PROTECTED
+        if str(pending.get("target", "")).lower() in ALWAYS_PROTECTED:
+            return {"status": "error", "error_code": "ERR_PROTECTED_PROCESS",
+                    "message": "Refusé : processus système protégé."}
+
     handler = TOOL_HANDLERS.get(tool_name)
 
     if not handler:
