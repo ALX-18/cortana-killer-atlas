@@ -45,6 +45,7 @@ class AtlasDesktop:
         }
 
         self._messages = queue.Queue()
+        self._shown_confirmations: set[str] = set()
         self._build_ui()
         self._apply_theme()
         self._tick_queue()
@@ -188,7 +189,7 @@ class AtlasDesktop:
 
     # Sprint E : couleurs alignées sur celles de l'icône de la zone de notification.
     VOICE_COLORS = {
-        "repos": "#4682b4", "écoute": "#2ecc71", "réfléchit": "#f39c12",
+        "repos": "#4682b4", "écoute": "#2ecc71", "suite": "#1abc9c", "réfléchit": "#f39c12",
         "parle": "#9b59b6", "arrêtée": "#7f8c8d", "problème": "#e74c3c",
     }
 
@@ -204,8 +205,10 @@ class AtlasDesktop:
             etat, detail = "arrêtée", "moteur vocal arrêté"
         elif voice.get("ok"):
             etat = voice.get("activity") or "repos"
-            stt = voice.get("stt", {}) or {}
-            detail = f"prête — dis « Hey Atlas » (transcription {stt.get('device_used') or '?'})"
+            if etat == "suite":
+                detail = "je t'écoute encore : enchaîne sans « Hey Atlas »"
+            else:
+                detail = f"prête — dis « Hey Atlas » (transcription {voice.get('stt_device') or '?'})"
         else:
             etat = "problème"
             detail = " ; ".join(voice.get("degraded_reason") or ["cause inconnue"])[:160]
@@ -253,6 +256,94 @@ class AtlasDesktop:
             self.status_text.configure(text="Sending...")
         else:
             self.status_text.configure(text="Ready")
+
+    # Sprint F — libellés lisibles des actions à confirmer.
+    ACTION_LABELS = {
+        "window_close": "Fermer la fenêtre",
+        "kill_process": "Arrêter le processus",
+        "run_powershell": "Exécuter la commande PowerShell",
+        "system_config": "Modifier le système",
+        "browser_open": "Ouvrir l'adresse",
+        "maintenance_empty_bin": "Vider la corbeille",
+        "schedule_remove": "Supprimer la tâche planifiée",
+        "schedule_add": "Créer la tâche planifiée",
+        "trigger_add": "Créer le déclencheur",
+        "workflow_create": "Créer le workflow",
+        "workflow_run": "Lancer le workflow",
+    }
+
+    def show_confirmation_dialog(self, data: dict):
+        """Affiche une confirmation en attente : action, cible, motif, délai, deux boutons.
+
+        Sprint F : une confirmation qu'on ne voit pas bloque l'action sans que personne le
+        sache. Celle-ci s'affiche au premier plan, décompte son délai et se ferme d'elle-même
+        à l'expiration — le moteur refuse alors par défaut.
+        """
+        cid = data.get("confirmation_id") or ""
+        if not cid or cid in self._shown_confirmations:
+            return
+        self._shown_confirmations.add(cid)
+
+        action = data.get("action") or "action"
+        cible = data.get("target") or "—"
+        motif = data.get("reason") or data.get("message") or "action sensible"
+        restant = {"s": int(data.get("expires_in") or 60)}
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Atlas — confirmation requise")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+
+        ttk.Label(dlg, text=self.ACTION_LABELS.get(action, action), style="CardTitle.TLabel",
+                  padding=(16, 12, 16, 2)).pack(anchor="w")
+        ttk.Label(dlg, text=f"Cible : {cible}", padding=(16, 2)).pack(anchor="w")
+        ttk.Label(dlg, text=f"Pourquoi je demande : {motif}", wraplength=360,
+                  padding=(16, 2)).pack(anchor="w")
+        if data.get("level"):
+            ttk.Label(dlg, text=f"Niveau : {data['level']}", padding=(16, 2)).pack(anchor="w")
+        decompte = ttk.Label(dlg, text="", style="Muted.TLabel", padding=(16, 6))
+        decompte.pack(anchor="w")
+
+        boutons = ttk.Frame(dlg, padding=(12, 4, 12, 12))
+        boutons.pack(fill="x")
+
+        def fermer():
+            self._shown_confirmations.discard(cid)
+            try:
+                dlg.destroy()
+            except Exception:
+                pass
+
+        def confirmer():
+            fermer()
+            self._send_confirm(cid, True)
+
+        def annuler():
+            fermer()
+            self._send_confirm(cid, False)
+
+        ttk.Button(boutons, text="Confirmer", style="Primary.TButton", command=confirmer).pack(side="left", padx=4)
+        ttk.Button(boutons, text="Annuler", style="Ghost.TButton", command=annuler).pack(side="left", padx=4)
+        dlg.protocol("WM_DELETE_WINDOW", annuler)
+
+        def tic():
+            if not dlg.winfo_exists():
+                return
+            if restant["s"] <= 0:
+                fermer()
+                self._append("system", f"Confirmation expirée ({self.ACTION_LABELS.get(action, action)} "
+                                       f"« {cible} ») : rien n'a été fait.")
+                return
+            decompte.config(text=f"Sans réponse, je refuse dans {restant['s']} s.")
+            restant["s"] -= 1
+            dlg.after(1000, tic)
+
+        tic()
+        # Une confirmation demandée à la voix doit se voir même si la fenêtre est derrière.
+        dlg.lift()
+        dlg.attributes("-topmost", True)
+        dlg.after(1500, lambda: dlg.winfo_exists() and dlg.attributes("-topmost", False))
+        dlg.focus_force()
 
     def show_disambiguation_dialog(self, data: dict):
         dlg = tk.Toplevel(self.root)
@@ -308,8 +399,10 @@ class AtlasDesktop:
                     self._messages.put(("atlas", "Action annulée."))
                 elif data.get("result", {}).get("message"):
                     self._messages.put(("atlas", data["result"]["message"]))
+                elif status == "expired":
+                    self._messages.put(("atlas", "Confirmation expirée : rien n'a été fait."))
                 else:
-                    self._messages.put(("atlas", data.get("message", "Action effectuée.")))
+                    self._messages.put(("atlas", data.get("message") or f"Réponse : {status or 'inconnue'}."))
             except Exception as e:
                 self._messages.put(("system", f"Confirm request failed: {e}"))
             finally:
@@ -332,6 +425,8 @@ class AtlasDesktop:
                     self.health_text.config(text=status_line)
                 elif role == "voice":
                     self._set_voice_state(payload)
+                elif role == "confirmation":
+                    self.show_confirmation_dialog(payload)
                 elif role == "atlas":
                     self._append("atlas", payload)
                 elif role == "system":
@@ -360,6 +455,11 @@ class AtlasDesktop:
                     r = client.get(f"{base}/api/voice/state")
                     r.raise_for_status()
                     self._messages.put(("voice", r.json()))
+                    # Sprint F : une confirmation demandée à la voix doit apparaître ici.
+                    c = client.get(f"{base}/api/confirmations")
+                    if c.status_code == 200:
+                        for item in c.json().get("pending", []):
+                            self._messages.put(("confirmation", item))
             except Exception:
                 self._messages.put(("voice", None))   # backend pas encore prêt : silence
 
@@ -455,8 +555,12 @@ class AtlasDesktop:
                     r.raise_for_status()
                     data = r.json()
 
-                if data.get("type") == "tool_execution":
-                    msg = data.get("message") or "Action executee."
+                if data.get("type") == "confirmation_required":
+                    self._messages.put(("confirmation", data))
+                elif data.get("type") == "tool_execution":
+                    # Sprint F : « Action executee. » s'affichait aussi quand RIEN n'avait été
+                    # exécuté (confirmation en attente, message absent). Plus de faux succès.
+                    msg = data.get("message") or "Terminé, sans détail renvoyé par l'action."
                     self._messages.put(("atlas", msg))
                 elif data.get("type") == "disambiguation_required":
                     self._messages.put(("disambiguation", {

@@ -326,3 +326,13 @@ Revue des 18 actions capables de modifier l'état de la machine. « Détecté ? 
 ---
 
 *Rapport Sprint B1 — CHAT6 (Claude Opus 5, Claude Code Windows), 17/09/2026.*
+
+---
+
+## Erratum
+
+> **Erratum du 27/09/2026** — L'annexe A indiquait pour `window_close` : « Atténué : confirmation obligatoire sur close ». C'était inexact : le moteur ignorait le drapeau de confirmation du validateur. Découvert au sprint E (R04, D-E1), corrigé au sprint F.
+
+> **Erratum complémentaire du 30/09/2026** — L'annexe A indiquait aussi « Confirmation obligatoire (validateur) » pour `schedule_add`, et une confirmation pour `trigger_add`, `workflow_run` et `workflow_create`. Même défaut, même cause : le validateur posait le drapeau, le moteur ne le lisait pas, et ces actions s'exécutaient sans rien demander. Découvert par l'audit des promesses du sprint F (F1), corrigé au sprint F (F2). Par ailleurs, les confirmations effectivement appliquées (`kill_process`, arrêts système) n'étaient **affichées nulle part** dans la fenêtre Atlas, qui répondait « Action executee. » : elles restaient en attente sans que l'utilisateur le sache.
+
+*Le texte d'origine ci-dessus n'a pas été modifié.*

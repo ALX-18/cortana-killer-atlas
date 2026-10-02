@@ -119,6 +119,7 @@ class AtlasSystray:
     STATE_COLORS = {
         "idle": (70, 130, 180),          # bleu   — au repos
         "listening": (46, 204, 113),     # vert   — il écoute
+        "follow_up": (26, 188, 156),     # turquoise — fenêtre de suite (sprint F)
         "processing": (243, 156, 18),    # orange — il réfléchit
         "speaking": (155, 89, 182),      # violet — il parle
         "error": (231, 76, 60),          # rouge  — problème
@@ -126,6 +127,7 @@ class AtlasSystray:
     STATE_LABELS = {
         "idle": "au repos",
         "listening": "il écoute",
+        "follow_up": "il t'écoute encore (sans « Hey Atlas »)",
         "processing": "il réfléchit",
         "speaking": "il parle",
         "error": "problème",
@@ -137,7 +139,7 @@ class AtlasSystray:
 
         image = self._PIL_Image.new("RGB", (64, 64), (25, 25, 30))
         draw = self._PIL_ImageDraw.Draw(image)
-        if state == "listening":
+        if state in ("listening", "follow_up"):
             # Anneau clair : l'écoute doit se distinguer nettement du repos.
             draw.ellipse((2, 2, 62, 62), outline=(245, 245, 245), width=4)
         draw.ellipse((10, 10, 54, 54), fill=color)
